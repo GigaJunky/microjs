@@ -1,0 +1,29 @@
+{
+  "wifi": {
+    "ssid": "YOUR_WIFI_NAME",
+    "pass": "YOUR_WIFI_PASSWORD"
+  },
+  "ap": {
+    "ssid": "",
+    "pass": ""
+  },
+  "utcOffsetHours": 0,
+  "location": {
+    "name": "London",
+    "lat": 51.51,
+    "lon": -0.13
+  },
+  "weatherRefreshMinutes": 10,
+  "stocks": {
+    "apiKey": "YOUR_TWELVE_DATA_API_KEY",
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "NVDA",
+      "TSLA"
+    ],
+    "refreshMinutes": 60
+  }
+}

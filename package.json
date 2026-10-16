@@ -1,0 +1,15 @@
+{
+  "name": "micro-js",
+  "description": "JavaScript for microcontroller display boards - tools for working with a board from a computer",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "ide": "node tools/serve.js",
+    "upload": "node tools/upload.js",
+    "version-check": "node tools/auto-version.js"
+  },
+  "dependencies": {
+    "serialport": "13.0.0"
+  }
+}

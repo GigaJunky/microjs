@@ -1,0 +1,29 @@
+.pio/
+.vscode/
+host/jsh
+host/jsh-asan
+host/test_native
+*.png
+sim-sd/
+
+# real credentials: keep the live config out of version control (it still uploads to your own board)
+data/micro-js.json
+data/esp32-js.json
+data/cyd-js.json
+# per-board state the apps write (high scores, sound, touch calibration)
+data/*.hi
+data/sound.json
+data/touchcal.json
+
+# flash backups of other firmware: never publish these
+backup/
+*.bak
+# built images: attach them to a GitHub release instead
+release/*.bin
+release/*.FLH
+release/*.zip
+# personal archives
+*.zip
+
+# Node tools (npm install)
+node_modules/

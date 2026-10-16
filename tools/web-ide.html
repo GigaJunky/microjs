@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>micro-js IDE</title>
+<!--
+  micro-js IDE: edit, run and upload scripts and other files on an micro-js board over USB, and
+  flash firmware - all from the browser. Needs Chrome or Edge on a desktop computer (Web Serial).
+  Open this file directly (file://), or serve it with the project's server: node tools/serve.js
+  (or npm run ide), then http://localhost:8000/tools/web-ide.html. Nothing is installed; the editor (CodeMirror) and the
+  flasher (Espressif's esptool-js) load from public CDNs.
+
+  How it talks to the board: through the normal serial REPL. Each request is one line that prints
+  its result between markers ("@@id:...:@@"), so it can be picked out of the board's other output.
+  Files travel as base64 (fs.writeBase64 / fs.readBase64) in pieces that fit the REPL's line buffer.
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+<style>
+  :root { --bg: #15161b; --panel: #1d1f27; --line: #2c2f3a; --text: #e3e5ec; --dim: #8a8fa0; --accent: #f0a030; --ok: #3fb970; --bad: #e05d5d; --blue: #4d8fe8; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
+  body { display: grid; grid-template-rows: auto auto 1fr; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; color: var(--accent); }
+  #info { color: var(--dim); font-size: 13px; flex: 1; min-width: 200px; }
+  button { background: #2e3240; color: var(--text); border: 1px solid #3a3f50; border-radius: 6px; padding: 6px 11px; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: #383d4e; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.danger { color: #ffb3b3; }
+  main { display: grid; grid-template-columns: 270px 1fr; grid-template-rows: 1fr 210px; min-height: 0; }
+  #files { grid-row: 1 / 3; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  #files .bar { display: flex; gap: 4px; padding: 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  #files .bar button { padding: 4px 8px; font-size: 13px; }
+  #where { padding: 6px 10px; color: var(--dim); font-size: 12px; border-bottom: 1px solid var(--line); word-break: break-all; }
+  #list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  #list.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .item { display: flex; align-items: center; gap: 6px; padding: 5px 10px; cursor: pointer; }
+  .item:hover { background: #262935; }
+  .item.sel { background: #2b3550; }
+  .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .size { color: var(--dim); font-size: 12px; }
+  .item.dir .name { color: #f3c96a; }
+  #editorBox { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  #edbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  #fname { flex: 1; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #fname b { color: var(--text); }
+  #ed { flex: 1; min-height: 0; position: relative; }
+  #ed .CodeMirror, #ed textarea { position: absolute; inset: 0; height: 100%; width: 100%; font: 13px ui-monospace, Menlo, Consolas, monospace; }
+  #ed textarea { background: #212121; color: #eee; border: 0; padding: 8px; resize: none; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); text-align: center; padding: 20px; }
+  #consoleBox { display: flex; flex-direction: column; border-top: 1px solid var(--line); min-height: 0; }
+  #console { flex: 1; overflow-y: auto; margin: 0; padding: 6px 10px; background: #0f1014; font: 12px ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  #console .me { color: #8fc1ff; }
+  #console .sys { color: var(--accent); }
+  #console .err { color: var(--bad); }
+  #replRow { display: flex; border-top: 1px solid var(--line); }
+  #repl { flex: 1; background: #0f1014; color: var(--text); border: 0; padding: 7px 10px; font: 12px ui-monospace, Menlo, Consolas, monospace; outline: none; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 18px; width: min(460px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h2 { margin: 0 0 10px; font-size: 17px; }
+  dialog label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
+  dialog input[type=text] { width: 100%; background: #0f1014; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px; font: inherit; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  progress { width: 100%; height: 14px; }
+  #busy { position: fixed; left: 50%; bottom: 230px; transform: translateX(-50%); background: #262a36; border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 320px; display: none; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  #busy div { margin-bottom: 6px; }
+  .note { color: var(--dim); font-size: 12px; line-height: 1.4; }
+  #nick { display: none; background: #3b2f12; color: #ffd27a; border: 1px solid #6b5420; border-radius: 6px; padding: 4px 10px; font-weight: 600; }
+  #boards { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 12px; background: #191b22; border-bottom: 1px solid var(--line); align-items: center; }
+  #boards:empty { display: none; }
+  #boards .lbl { color: var(--dim); font-size: 12px; margin-right: 4px; }
+  #boards button small { color: var(--dim); margin-left: 6px; }
+  #nosupport { display: none; position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 5; background: #3a1d1d; border: 1px solid var(--bad); border-radius: 8px; padding: 10px 16px; color: #ffc9c9; }
+</style>
+</head>
+<body>
+<header>
+  <h1>micro-js IDE</h1>
+  <button id="connect" class="primary" title="Choose a board in Chrome's list">Connect...</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <span id="nick"></span>
+  <span id="info">Not connected. Plug the board in by USB and press Connect.</span>
+  <button id="identify" disabled title="Beep, flash the LED and show THIS ONE on the board's screen (then it goes back to its launcher)">Identify</button>
+  <button id="nameBoard" disabled title="Give this board a name (kept in this browser)">Name...</button>
+  <button id="stop" disabled title="Stop the running app (Ctrl+C)">Stop app</button>
+  <button id="menu" disabled title="Back to the board's launcher">Launcher</button>
+  <button id="flash" title="Write a firmware image (.bin)">Flash firmware...</button>
+</header>
+<div id="boards"></div>
+<div id="nosupport">This page needs Web Serial: use Chrome or Edge on a desktop computer.</div>
+<main>
+  <section id="files">
+    <div class="bar">
+      <button id="goFlash" disabled>Flash</button>
+      <button id="goSd" disabled>SD card</button>
+      <button id="up" disabled title="Up a folder">Up</button>
+      <button id="refresh" disabled title="Refresh">Refresh</button>
+      <button id="newFile" disabled>New file</button>
+      <button id="newDir" disabled>New folder</button>
+      <button id="upload" disabled>Upload...</button>
+      <input type="file" id="pick" multiple hidden>
+    </div>
+    <div id="where">-</div>
+    <div id="list"></div>
+    <div class="bar">
+      <button id="open" disabled>Open</button>
+      <button id="runFile" disabled>Run</button>
+      <button id="download" disabled>Download</button>
+      <button id="rename" disabled>Rename</button>
+      <button id="del" disabled class="danger">Delete</button>
+    </div>
+  </section>
+  <section id="editorBox">
+    <div id="edbar">
+      <span id="fname">No file open</span>
+      <button id="save" disabled title="Ctrl+S">Save</button>
+      <button id="saveRun" disabled class="primary" title="Ctrl+Enter">Save &amp; run</button>
+    </div>
+    <div id="ed"><div id="empty">Connect, then double-click a script on the left to edit it.<br><br>
+      <span class="note">Ctrl+S saves, Ctrl+Enter saves and runs. Drop files onto the file list to upload them.</span></div></div>
+  </section>
+  <section id="consoleBox">
+    <pre id="console"></pre>
+    <div id="replRow"><input id="repl" placeholder="JavaScript for the board's console (Enter to run, Up for history)" disabled></div>
+  </section>
+</main>
+
+<div id="busy"><div id="busyText">Working...</div><progress id="busyBar" max="1" value="0"></progress></div>
+
+<dialog id="flashDlg">
+  <h2>Flash firmware</h2>
+  <p class="note">Writes a firmware image with Espressif's esptool-js. For micro-js use a release image:
+    <b>-full.bin</b> (firmware and apps - replaces everything) or <b>-app.bin</b> (firmware only, keeps the apps), both at address 0x0.
+    If it won't connect, hold the board's BOOT button while it starts.</p>
+  <label>Image (.bin)</label>
+  <input type="file" id="flashFile" accept=".bin">
+  <label>Address</label>
+  <input type="text" id="flashAddr" value="0x0">
+  <label><input type="checkbox" id="flashErase"> Erase the whole flash first (removes all apps and settings)</label>
+  <div class="row"><button id="flashCancel">Cancel</button><button id="flashGo" class="primary">Flash</button></div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const CHUNK = 480;  // bytes per upload line: 640 base64 characters, well inside the board's 1 KB line buffer
+const TEXT_TYPES = ["js", "json", "txt", "html", "htm", "css", "md", "csv", "conf", "cfg", "ini", "log", "hi", "bas", "xml"];
+
+let port = null, writer = null, reader = null, rx = "", connected = false, readLoopDone = null;
+let seq = 0;
+const pending = new Map();  // request id -> {resolve, reject, timer}
+let cwd = "/", entries = [], selected = null, openPath = null, dirty = false, editor = null, board = null;
+
+// ---------------------------------------------------------------- console
+const consoleEl = $("console");
+function log(text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text.endsWith("\n") ? text : text + "\n";
+  consoleEl.appendChild(span);
+  while (consoleEl.childNodes.length > 1500) consoleEl.removeChild(consoleEl.firstChild);
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+let partial = "", partialTimer = 0;
+function onText(text) {
+  rx += text;
+  let nl;
+  while ((nl = rx.indexOf("\n")) >= 0) {
+    const line = rx.slice(0, nl).replace(/\r$/, "");
+    rx = rx.slice(nl + 1);
+    handleLine(line);
+  }
+  clearTimeout(partialTimer);
+  // a prompt or other text without a newline: show it after a moment (unless it's ours)
+  if (rx && !rx.includes('"@" + "@') && !rx.startsWith("@@")) partialTimer = setTimeout(() => { if (rx) { log(rx); rx = ""; } }, 300);
+}
+function handleLine(line) {
+  const m = line.match(/@@(\d+):(.*):@@/);
+  if (m) {
+    const p = pending.get(+m[1]);
+    if (p) {
+      pending.delete(+m[1]);
+      clearTimeout(p.timer);
+      try {
+        const r = JSON.parse(m[2]);
+        if ("err" in r) p.reject(new Error(r.err)); else p.resolve(r.ok);
+      } catch (e) { p.reject(e); }
+    }
+    return;
+  }
+  if (line.includes('"@" + "@')) return;  // the board echoing one of our requests
+  if (/^\s*>\s*$/.test(line)) return;      // bare prompts
+  log(line, /error|Uncaught|failed/i.test(line) ? "err" : "");
+}
+
+// ---------------------------------------------------------------- serial
+async function send(text) {
+  if (!writer) throw new Error("not connected");
+  await writer.write(new TextEncoder().encode(text));
+}
+// Run an expression on the board and get its value back (JSON). The marker is split in the source
+// ("@" + "@") so the board's echo of this line doesn't look like a reply.
+function call(expr, timeout = 15000) {
+  const id = ++seq;
+  const line = `console.log("@" + "@${id}:" + JSON.stringify((() => { try { return { ok: (${expr}) }; } catch (e) { return { err: String(e && e.message || e) }; } })()) + ":@@")\r\n`;
+  if (line.length > 1000) return Promise.reject(new Error("request too long"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error("the board didn't answer")); }, timeout);
+    pending.set(id, { resolve, reject, timer });
+    send(line).catch((e) => { clearTimeout(timer); pending.delete(id); reject(e); });
+  });
+}
+const q = (s) => JSON.stringify(s);  // a JS string literal
+
+async function connect(chosen) {
+  try {
+    port = chosen || (await navigator.serial.requestPort());
+  } catch (e) { return; }  // the user closed the chooser
+  try { await openPort(); }
+  catch (e) { log("couldn't open the port: " + e.message + " (another program or tab using it? see the README's troubleshooting)", "err"); setConnected(false); }
+}
+async function openPort() {
+  await port.open({ baudRate: 115200 });
+  writer = port.writable.getWriter();
+  connected = true;
+  readLoopDone = readLoop();
+  setConnected(true);
+  log("connected", "sys");
+  await send("\r\n");
+  await refreshInfo();
+  await listDir("/");
+}
+async function readLoop() {
+  const dec = new TextDecoder();
+  while (port && port.readable && connected) {
+    reader = port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        onText(dec.decode(value, { stream: true }));
+      }
+    } catch (e) {
+      if (connected) log("serial: " + e.message, "err");
+      break;
+    } finally {
+      reader.releaseLock();
+      reader = null;
+    }
+  }
+}
+async function disconnect() {
+  connected = false;
+  for (const [id, p] of pending) { clearTimeout(p.timer); p.reject(new Error("disconnected")); }
+  pending.clear();
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { await readLoopDone; } catch (e) {}
+  try { if (writer) { writer.releaseLock(); writer = null; } } catch (e) {}
+  try { await port.close(); } catch (e) {}
+  setConnected(false);
+  log("disconnected", "sys");
+}
+function setConnected(on) {
+  for (const id of ["disconnect", "stop", "menu", "goFlash", "up", "refresh", "newFile", "newDir", "upload", "repl", "identify", "nameBoard"]) $(id).disabled = !on;
+  if (!on) $("nick").style.display = "none";
+  $("boards").style.display = on ? "none" : "";
+  $("goSd").disabled = !on || !(board && board.sd);
+  $("connect").disabled = on;
+  if (!on) { $("info").textContent = "Not connected."; $("list").innerHTML = ""; $("where").textContent = "-"; }
+  updateFileButtons();
+  updateEditorButtons();
+}
+
+// ---------------------------------------------------------------- board info and files
+async function refreshInfo() {
+  try {
+    board = await call(`({ id: board.id || "", name: board.name, version: sys.version || "?", heap: sys.heap().free, sd: !!board.hasSd, flash: fs.space ? fs.space("/") : null, card: fs.space && board.hasSd ? fs.space("/sd") : null })`);
+    showNick();
+    const kb = (n) => (n / 1024).toFixed(0) + " KB";
+    let t = `${board.name} - micro-js ${board.version} - ${kb(board.heap)} RAM free`;
+    if (board.flash) t += ` - flash ${kb(board.flash.total - board.flash.used)} free`;
+    if (board.card && board.card.total) t += ` - SD ${(((board.card.total - board.card.used) / 1073741824)).toFixed(1)} GB free`;
+    $("info").textContent = t;
+    $("goSd").disabled = !board.sd;
+    if (!board.version || board.version === "?") log("This board's firmware is older than this page expects - flash a current release for uploads to work.", "err");
+  } catch (e) { log("couldn't read the board: " + e.message, "err"); }
+}
+const join = (dir, n) => (dir === "/" ? "/" + n : dir + "/" + n);
+const parentOf = (p) => (p === "/" || p === "/sd" ? p : p.slice(0, p.lastIndexOf("/")) || "/");
+function human(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+async function listDir(dir) {
+  try {
+    const list = await call(`fs.dir(${q(dir)})`);
+    cwd = dir;
+    entries = list.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name)));
+    selected = null;
+    renderList();
+  } catch (e) { log("list: " + e.message, "err"); }
+}
+function renderList() {
+  $("where").textContent = (cwd.startsWith("/sd") ? "SD card" : "Flash") + "  " + (cwd.startsWith("/sd") ? cwd.slice(3) || "/" : cwd);
+  const box = $("list");
+  box.innerHTML = "";
+  for (const e of entries) {
+    const div = document.createElement("div");
+    div.className = "item" + (e.dir ? " dir" : "") + (selected === e ? " sel" : "");
+    div.innerHTML = `<span class="name"></span><span class="size"></span>`;
+    div.querySelector(".name").textContent = (e.dir ? "/" : "") + e.name;
+    div.querySelector(".size").textContent = e.dir ? "" : human(e.size);
+    div.onclick = () => { selected = e; renderList(); };
+    div.ondblclick = () => (e.dir ? listDir(join(cwd, e.name)) : openFile(join(cwd, e.name), e));
+    box.appendChild(div);
+  }
+  if (!entries.length) box.innerHTML = '<div class="item" style="color:var(--dim)">(empty)</div>';
+  updateFileButtons();
+}
+function updateFileButtons() {
+  const f = connected && selected;
+  $("open").disabled = !f;
+  $("runFile").disabled = !f || selected.dir || !selected.name.endsWith(".js");
+  $("download").disabled = !f || selected.dir;
+  $("rename").disabled = !f;
+  $("del").disabled = !f;
+}
+
+// read a whole file as bytes, piece by piece
+async function readFile(path, size, progressText) {
+  const out = new Uint8Array(size);
+  let off = 0;
+  while (off < size) {
+    busy(progressText || "Reading " + path, off / size);
+    const b64 = await call(`fs.readBase64(${q(path)}, ${off}, 2000)`);
+    if (b64 === null) throw new Error("can't open " + path);
+    if (!b64) break;
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    out.set(bytes, off);
+    off += bytes.length;
+  }
+  busy(null);
+  return out.slice(0, off);
+}
+// write bytes to a file: to a temporary name first, then swapped in, so an interrupted upload
+// never leaves half a file under the real name
+async function writeFile(path, bytes, label) {
+  const tmp = path + ".part";
+  if (bytes.length === 0) {
+    if (!(await call(`fs.writeBase64(${q(tmp)}, "")`))) throw new Error("can't write " + path);
+  }
+  for (let off = 0; off < bytes.length; off += CHUNK) {
+    busy(`${label || "Uploading " + path}  ${human(off)} / ${human(bytes.length)}`, off / bytes.length);
+    let s = "";
+    const part = bytes.subarray(off, off + CHUNK);
+    for (let i = 0; i < part.length; i++) s += String.fromCharCode(part[i]);
+    const ok = await call(`fs.writeBase64(${q(tmp)}, "${btoa(s)}", ${off > 0})`);
+    if (!ok) { busy(null); throw new Error("the board couldn't write " + path + " (full?)"); }
+  }
+  busy(label || "Uploading " + path, 1);
+  await call(`(fs.exists(${q(path)}) ? fs.remove(${q(path)}) : true) && fs.rename(${q(tmp)}, ${q(path)})`);
+  busy(null);
+}
+
+// ---------------------------------------------------------------- editor
+function makeEditor() {
+  $("empty").style.display = "none";
+  if (window.CodeMirror) {
+    editor = CodeMirror($("ed"), { mode: "javascript", theme: "material-darker", lineNumbers: true, indentUnit: 2, tabSize: 2,
+      extraKeys: { Tab: (cm) => cm.replaceSelection("  "), "Ctrl-S": () => save(false), "Cmd-S": () => save(false), "Ctrl-Enter": () => save(true), "Cmd-Enter": () => save(true) } });
+    editor.on("change", () => { if (!dirty) { dirty = true; updateEditorButtons(); } });
+  } else {  // the CDN didn't load (offline): a plain text box
+    const ta = document.createElement("textarea");
+    ta.spellcheck = false;
+    $("ed").appendChild(ta);
+    editor = { getValue: () => ta.value, setValue: (v) => (ta.value = v), setOption() {}, clearHistory() {}, focus: () => ta.focus() };
+    ta.addEventListener("input", () => { if (!dirty) { dirty = true; updateEditorButtons(); } });
+  }
+}
+async function openFile(path, entry) {
+  const ext = path.split(".").pop().toLowerCase();
+  if (!TEXT_TYPES.includes(ext)) return download(path, entry);
+  if (dirty && !confirm(`Discard your changes to ${openPath}?`)) return;
+  try {
+    const bytes = await readFile(path, entry.size, "Opening " + path);
+    if (!editor) makeEditor();
+    editor.setValue(new TextDecoder().decode(bytes));
+    editor.setOption("mode", ext === "js" || ext === "json" ? "javascript" : null);
+    editor.clearHistory();
+    openPath = path;
+    dirty = false;
+    updateEditorButtons();
+    editor.focus();
+  } catch (e) { busy(null); log("open: " + e.message, "err"); }
+}
+function updateEditorButtons() {
+  $("save").disabled = !connected || !openPath;
+  $("saveRun").disabled = !connected || !openPath || !openPath.endsWith(".js");
+  $("fname").innerHTML = openPath ? `<b></b>${dirty ? "  (changed)" : ""}` : "No file open";
+  if (openPath) $("fname").querySelector("b").textContent = openPath;
+}
+async function save(run) {
+  if (!connected || !openPath) return;
+  try {
+    await writeFile(openPath, new TextEncoder().encode(editor.getValue()), "Saving " + openPath);
+    dirty = false;
+    updateEditorButtons();
+    log("saved " + openPath, "sys");
+    if (parentOf(openPath) === cwd) listDir(cwd);
+    if (run && openPath.endsWith(".js")) await runPath(openPath);
+  } catch (e) { busy(null); log("save: " + e.message, "err"); }
+}
+async function runPath(path) {
+  log("running " + path, "sys");
+  await send(`launch(${q(path)})\r\n`);
+}
+
+// ---------------------------------------------------------------- file actions
+async function download(path, entry) {
+  try {
+    const bytes = await readFile(path, entry.size, "Downloading " + path);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes]));
+    a.download = path.split("/").pop();
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { busy(null); log("download: " + e.message, "err"); }
+}
+async function uploadFiles(files) {
+  for (const f of files) {
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const path = join(cwd, f.name);
+      const exists = entries.some((e) => e.name === f.name);
+      if (exists && !confirm(`Replace ${path} on the board?`)) continue;
+      await writeFile(path, bytes, `Uploading ${f.name}`);
+      log(`uploaded ${path} (${human(bytes.length)})`, "sys");
+    } catch (e) { busy(null); log("upload: " + e.message, "err"); }
+  }
+  await listDir(cwd);
+  refreshInfo();
+}
+
+// ---------------------------------------------------------------- busy indicator
+function busy(text, frac) {
+  const box = $("busy");
+  if (text === null) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  $("busyText").textContent = text;
+  $("busyBar").value = frac || 0;
+}
+
+// ---------------------------------------------------------------- firmware
+async function flashFirmware() {
+  const file = $("flashFile").files[0];
+  if (!file) return alert("Choose a .bin file first.");
+  const addr = parseInt($("flashAddr").value, 16);
+  if (isNaN(addr)) return alert("The address should be hex, like 0x0.");
+  $("flashDlg").close();
+  const data = new Uint8Array(await file.arrayBuffer());
+  try {
+    if (!port) {
+      port = await navigator.serial.requestPort();
+    } else if (connected) await disconnect();
+    busy("Loading the flasher...", 0);
+    const { ESPLoader, Transport } = await import("https://unpkg.com/esptool-js@0.6.1/bundle.js");
+    const transport = new Transport(port, false);
+    const term = { clean() {}, writeLine: (t) => log(t, "sys"), write: (t) => log(t, "sys") };
+    const loader = new ESPLoader({ transport, baudrate: 921600, terminal: term });
+    busy("Connecting to the bootloader...", 0);
+    const chip = await loader.main();
+    log("flashing " + file.name + " to " + chip + " at 0x" + addr.toString(16), "sys");
+    if ($("flashErase").checked) { busy("Erasing the flash...", 0); await loader.eraseFlash(); }
+    await loader.writeFlash({
+      fileArray: [{ data, address: addr }], flashMode: "keep", flashFreq: "keep", flashSize: "keep",
+      eraseAll: false, compress: true,
+      reportProgress: (i, written, total) => busy(`Flashing ${file.name}  ${human(written)} / ${human(total)}`, written / total),
+    });
+    busy("Restarting the board...", 1);
+    await loader.after("hard_reset");
+    await transport.disconnect();
+    busy(null);
+    log("flashed - the board is restarting. Press Connect when it's up (a few seconds).", "sys");
+  } catch (e) {
+    busy(null);
+    log("flash: " + (e.message || e), "err");
+    try { await port.close(); } catch (e2) {}
+  }
+  setConnected(false);
+}
+
+// ---------------------------------------------------------------- telling boards apart
+// Chrome's port list only shows the USB chip's name, so each board is known by its id (its MAC
+// address); you name it here and the name is kept in this browser.
+function nicks() { try { return JSON.parse(localStorage.getItem("microjs.nicks") || localStorage.getItem("esp32js.nicks") || "{}"); } catch (e) { return {}; } }
+function nickFor(b) { return (b && b.id && nicks()[b.id]) || ""; }
+function showNick() {
+  const n = nickFor(board), el = $("nick");
+  el.textContent = n || (board ? board.name : "");
+  el.title = board && board.id ? "board id " + board.id : "";
+  el.style.display = board ? "inline-block" : "none";
+}
+async function nameBoard() {
+  if (!board || !board.id) return alert("This board's firmware doesn't report an id yet - flash a current release.");
+  const n = prompt(`Name for this board (${board.name}, id ${board.id}):`, nickFor(board) || board.name);
+  if (n === null) return;
+  const all = nicks();
+  if (n.trim()) all[board.id] = n.trim(); else delete all[board.id];
+  localStorage.setItem("microjs.nicks", JSON.stringify(all));
+  showNick();
+  probeBoards();
+}
+async function identify() {
+  const label = nickFor(board) || "THIS ONE";
+  await call(`(tone(1200, 120), setTimeout(() => tone(1600, 160), 180), led(0, 0, 255), setTimeout(() => led(0, 0, 0), 400),
+    setTimeout(() => led(0, 0, 255), 800), setTimeout(() => led(0, 0, 0), 1200), lcd.fillScreen(lcd.NAVY), lcd.setTextDatum(lcd.MC),
+    lcd.setTextColor(lcd.YELLOW), lcd.drawString("THIS ONE", lcd.width() / 2, lcd.height() / 2 - 16, 4), lcd.setTextColor(lcd.WHITE),
+    lcd.drawString(${q(label === "THIS ONE" ? board.name : label)}, lcd.width() / 2, lcd.height() / 2 + 16, 2), setTimeout(() => launch("/main.js"), 3000), true)`)
+    .catch((e) => log("identify: " + e.message, "err"));
+}
+// Boards this browser may already use: open each for a moment, ask who it is, list a button for it.
+async function probeOne(p) {
+  await p.open({ baudRate: 115200 });
+  const w = p.writable.getWriter(), r = p.readable.getReader(), dec = new TextDecoder();
+  let buf = "", result = null;
+  try {
+    await w.write(new TextEncoder().encode('\r\nconsole.log("@" + "@0:" + JSON.stringify({ id: board.id || "", name: board.name }) + ":@@")\r\n'));
+    const end = Date.now() + 2500;
+    while (Date.now() < end && !result) {
+      const { value, done } = await Promise.race([r.read(), new Promise((res) => setTimeout(() => res({ value: null, done: false }), 300))]);
+      if (done) break;
+      if (value) buf += dec.decode(value, { stream: true });
+      const m = buf.match(/@@0:(.*):@@/);
+      if (m) result = JSON.parse(m[1]);
+    }
+  } finally {
+    try { await r.cancel(); } catch (e) {}
+    r.releaseLock();
+    w.releaseLock();
+    await p.close();
+  }
+  return result;
+}
+async function probeBoards() {
+  if (!("serial" in navigator) || connected) return;
+  const bar = $("boards");
+  const ports = await navigator.serial.getPorts();
+  bar.innerHTML = "";
+  if (!ports.length) return;
+  bar.innerHTML = '<span class="lbl">Your boards:</span>';
+  for (const p of ports) {
+    const btn = document.createElement("button");
+    btn.textContent = "checking...";
+    bar.appendChild(btn);
+    let who = null;
+    try { who = await probeOne(p); } catch (e) {}
+    if (!who) { btn.textContent = "a board (busy or asleep)"; btn.onclick = () => connect(p); continue; }
+    btn.innerHTML = "";
+    btn.append(nickFor(who) || who.name);
+    const small = document.createElement("small");
+    small.textContent = who.id ? who.id.slice(-5) : "";
+    btn.appendChild(small);
+    btn.title = `${who.name}${who.id ? "  id " + who.id : ""} - click to connect`;
+    btn.onclick = () => connect(p);
+  }
+}
+
+// ---------------------------------------------------------------- wiring
+if (!("serial" in navigator)) {
+  $("nosupport").style.display = "block";
+  $("connect").disabled = true;
+  $("flash").disabled = true;
+}
+$("connect").onclick = () => connect();
+$("disconnect").onclick = async () => { await disconnect(); probeBoards(); };
+$("identify").onclick = identify;
+$("nameBoard").onclick = nameBoard;
+if ("serial" in navigator) {
+  probeBoards();
+  navigator.serial.addEventListener("connect", () => { if (!connected) probeBoards(); });     // plugged in
+  navigator.serial.addEventListener("disconnect", (e) => {                                   // unplugged
+    if (connected && e.target === port) { log("the board was unplugged", "err"); disconnect(); }
+    if (!connected) probeBoards();
+  });
+}
+$("stop").onclick = () => send("\x03");
+$("menu").onclick = () => send('launch("/main.js")\r\n');
+$("goFlash").onclick = () => listDir("/");
+$("goSd").onclick = () => listDir("/sd");
+$("up").onclick = () => listDir(parentOf(cwd));
+$("refresh").onclick = () => { listDir(cwd); refreshInfo(); };
+$("open").onclick = () => selected && (selected.dir ? listDir(join(cwd, selected.name)) : openFile(join(cwd, selected.name), selected));
+$("runFile").onclick = () => selected && runPath(join(cwd, selected.name));
+$("download").onclick = () => selected && download(join(cwd, selected.name), selected);
+$("del").onclick = async () => {
+  if (!selected) return;
+  const p = join(cwd, selected.name);
+  if (!confirm(`Delete ${p}${selected.dir ? " (it must be empty)" : ""}?`)) return;
+  const ok = await call(selected.dir ? `fs.rmdir(${q(p)})` : `fs.remove(${q(p)})`).catch((e) => log(e.message, "err"));
+  if (!ok) log("couldn't delete " + p, "err");
+  listDir(cwd);
+};
+$("rename").onclick = async () => {
+  if (!selected) return;
+  const n = prompt("New name:", selected.name);
+  if (!n || n === selected.name || n.includes("/")) return;
+  const ok = await call(`fs.rename(${q(join(cwd, selected.name))}, ${q(join(cwd, n))})`).catch((e) => log(e.message, "err"));
+  if (!ok) log("couldn't rename", "err");
+  listDir(cwd);
+};
+$("newFile").onclick = async () => {
+  const n = prompt("New file name:", "myapp.js");
+  if (!n || n.includes("/")) return;
+  const p = join(cwd, n);
+  await writeFile(p, new TextEncoder().encode(n.endsWith(".js") ? "// " + n + "\nlcd.fillScreen(lcd.BLACK);\nlcd.drawString(\"Hello!\", 10, 10, 4);\n" : ""), "Creating " + p).catch((e) => log(e.message, "err"));
+  await listDir(cwd);
+  const e = entries.find((x) => x.name === n);
+  if (e) openFile(p, e);
+};
+$("newDir").onclick = async () => {
+  const n = prompt("New folder name:");
+  if (!n || n.includes("/")) return;
+  const ok = await call(`fs.mkdir(${q(join(cwd, n))})`).catch((e) => log(e.message, "err"));
+  if (!ok) log("couldn't make the folder", "err");
+  listDir(cwd);
+};
+$("upload").onclick = () => $("pick").click();
+$("pick").onchange = () => { uploadFiles([...$("pick").files]); $("pick").value = ""; };
+const list = $("list");
+list.ondragover = (e) => { if (connected) { e.preventDefault(); list.classList.add("drop"); } };
+list.ondragleave = () => list.classList.remove("drop");
+list.ondrop = (e) => { e.preventDefault(); list.classList.remove("drop"); if (connected) uploadFiles([...e.dataTransfer.files]); };
+$("save").onclick = () => save(false);
+$("saveRun").onclick = () => save(true);
+$("flash").onclick = () => $("flashDlg").showModal();
+$("flashCancel").onclick = () => $("flashDlg").close();
+$("flashGo").onclick = flashFirmware;
+const history = [];
+let hpos = 0;
+$("repl").addEventListener("keydown", async (e) => {
+  if (e.key === "Enter") {
+    const line = e.target.value;
+    if (!line) return;
+    history.push(line);
+    hpos = history.length;
+    e.target.value = "";
+    log("> " + line, "me");
+    await send(line + "\r\n");
+  } else if (e.key === "ArrowUp" && hpos > 0) { e.target.value = history[--hpos]; e.preventDefault(); }
+  else if (e.key === "ArrowDown") { hpos = Math.min(history.length, hpos + 1); e.target.value = history[hpos] || ""; }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(false); }
+});
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+</script>
+</body>
+</html>

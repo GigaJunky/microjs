@@ -17,41 +17,50 @@ const fit = (s, px) => { const n = Math.floor(px / (F === 1 ? 6 : 8)); return s.
 const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1, p.length - 4);
 const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
-// ---- find the videos (a big SD card can take a while: say what is happening, so it doesn't look stuck)
-const videos = [];
+// ---- find the videos: from the saved playlist while the card is unchanged, else by scanning (a
+// big card takes seconds: say what is happening, so it doesn't look stuck)
+load("/lib/medialist.js");
+const PLAYLIST = "/sd/videos.m3u";
+let videos = [], single = false, scanShown = false;
 const SY = TOP + 8 + (SMALL ? 14 : 24);
-function scanScreen() {
-  lcd.fillScreen(BG);
-  lcd.fillRect(0, 0, W, TOP - 2, PANEL);
-  lcd.setTextDatum(lcd.TL);
-  lcd.setTextColor(ACCENT);
-  lcd.drawString("Videos", 4, 2, F);
-  lcd.setTextColor(lcd.WHITE);
-  lcd.drawString("Looking for videos...", 4, TOP + 4, F);
-}
-function scanStatus(dir) {
+function scanStatus(dir, found) {
+  if (!scanShown) {
+    scanShown = true;
+    lcd.fillScreen(BG);
+    lcd.fillRect(0, 0, W, TOP - 2, PANEL);
+    lcd.setTextDatum(lcd.TL);
+    lcd.setTextColor(ACCENT);
+    lcd.drawString("Videos", 4, 2, F);
+    lcd.setTextColor(lcd.WHITE);
+    lcd.drawString("Looking for videos...", 4, TOP + 4, F);
+  }
   const h = SMALL ? 11 : 14;
   lcd.fillRect(0, SY, W, 2 * h + 2, BG);
   lcd.setTextDatum(lcd.TL);
   lcd.setTextColor(lcd.LIGHTGREY);
-  lcd.drawString(fit(dir, W - 8), 4, SY, 1);
+  lcd.drawString(fit(dir, W - 8), 4, SY, 1);  // before the listing: a big folder takes a while
   lcd.setTextColor(lcd.GREENYELLOW);
-  lcd.drawString(videos.length + (videos.length === 1 ? " video" : " videos") + " found", 4, SY + h, 1);
+  lcd.drawString(found + (found === 1 ? " video" : " videos") + " found", 4, SY + h, 1);
 }
-function scan(dir, depth) {
-  scanStatus(dir);  // before the listing: a folder with thousands of files takes a while
-  let names = [];
-  try { names = fs.list(dir); } catch (e) {}
-  for (const n of names.sort()) {
-    if (n.endsWith("/")) {
-      if (depth < 2 && !n.startsWith(".") && n !== "System Volume Information/") scan((dir === "/" ? "" : dir) + "/" + n.slice(0, -1), depth + 1);
-    } else if (n.toLowerCase().endsWith(".avi")) videos.push((dir === "/" ? "" : dir) + "/" + n);
-  }
+function loadVideos(rescan) {
+  scanShown = false;
+  const flash = fs.list("/").filter((n) => !n.endsWith("/") && n.toLowerCase().endsWith(".avi")).sort().map((n) => "/" + n);
+  videos = mediaFiles(".avi", PLAYLIST, scanStatus, rescan).concat(flash);
+  single = false;
 }
-scanScreen();
-scan("/sd", 0);
-scan("/", 1);  // the flash: just its top level
-
+// r / tapping the title: scan the card again; from a single video (started in the file manager),
+// l / the same tap: list them all
+function reload(rescan) {
+  const keep = videos[sel];
+  loadVideos(rescan);
+  if (keep && !videos.includes(keep)) videos.unshift(keep);
+  sel = Math.max(0, videos.indexOf(keep));
+  top = 0;
+  note = "";
+  drawList();
+}
+const arg = typeof ARG === "string" && ARG ? ARG : "";
+if (arg) { videos = [arg]; single = true; } else loadVideos(false);  // started with a file: no search at all
 
 function drawList() {
   lcd.fillScreen(BG);
@@ -59,6 +68,12 @@ function drawList() {
   lcd.setTextDatum(lcd.TL);
   lcd.setTextColor(ACCENT);
   lcd.drawString("Videos", 4, 2, F);
+  if (videos.length > 1 || mediaFrom) {
+    lcd.setTextDatum(lcd.TR);
+    lcd.setTextColor(lcd.DARKGREY);
+    lcd.drawString(videos.length + " videos" + (mediaFrom === "playlist" ? " - saved list" : ""), W - 4, 3, 1);
+    lcd.setTextDatum(lcd.TL);
+  }
   if (!videos.length) {
     lcd.setTextColor(lcd.LIGHTGREY);
     lcd.drawString("No .avi files on the SD card.", 4, TOP + 4, F);
@@ -73,7 +88,9 @@ function drawList() {
     lcd.drawString(fit(nameOf(videos[i]) + (videos[i].startsWith("/sd") ? "" : "  (flash)"), W - 8), 4, y + TY, F);
   }
   lcd.setTextColor(lcd.DARKGREY);
-  lcd.drawString(fit(note || (TOUCH ? "Tap to play. While playing: tap pauses, hold stops." : "Enter plays. Space pauses, Enter stops."), W - 8), 4, H - (SMALL ? 10 : 14), 1);
+  const hint = TOUCH ? "Tap to play; tap the title to " + (single ? "list all videos." : "rescan the card.")
+    : "Enter plays, Space pauses. " + (single ? "l lists all videos." : "r rescans the card.");
+  lcd.drawString(fit(note || hint, W - 8), 4, H - (SMALL ? 10 : 14), 1);
 }
 
 function play(i) {
@@ -116,6 +133,8 @@ keyboard.on("key", ({ key }) => {
   if (key === "ArrowUp" || key === ";") { sel = Math.max(0, sel - 1); drawList(); }
   else if (key === "ArrowDown" || key === ".") { sel = Math.min(videos.length - 1, sel + 1); drawList(); }
   else if (key === "Enter" || key === " ") play(sel);
+  else if (key === "r") reload(true);
+  else if (key === "l" && single) reload(false);
   else if (key === "Escape") launch("/main.js");
 });
 let downAt = 0, downY = 0;
@@ -123,7 +142,8 @@ touch.on("down", ({ y }) => { downAt = millis(); downY = y; });
 touch.on("up", () => {
   const long = millis() - downAt > 600;
   if (playing) return long ? stop() : pause();
-  if (downY < TOP || downY >= TOP + ROWS * LH) return;
+  if (downY < TOP) return reload(!single);
+  if (downY >= TOP + ROWS * LH) return;
   const i = top + Math.floor((downY - TOP) / LH);
   if (i < videos.length) play(i);
 });
@@ -139,8 +159,4 @@ setInterval(() => {
 }, 200);
 
 drawList();
-if (typeof ARG === "string" && ARG) {  // launched with a file (from files.js)
-  const i = videos.indexOf(ARG);
-  if (i >= 0) play(i);
-  else { videos.unshift(ARG); play(0); }
-}
+if (arg) play(0);  // launched with a file (from files.js)

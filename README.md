@@ -304,6 +304,17 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   seconds, duration, sound, error, ended}`. Don't draw while a video plays. The CYD-S3 plays
   320×180 at 30 fps and 320×240 at about 24 fps; frames that would be late are skipped so the
   sound never stutters.
+- **Finding the songs and videos:** `mp3.js` and `video.js` look through the SD card (the top level
+  and two folders down), which takes seconds on a card with many files (about 5 s on a media card, a
+  minute on a card holding a whole system image). A "Looking for songs / videos..." screen shows the
+  folder being listed and the count so far. The result is saved as a playlist on the card -
+  `/sd/playlist.m3u` for music, `/sd/videos.m3u` for video, ordinary M3U files - and the next start
+  reads that instead (a fraction of a second). The first line records how full the card is
+  (`fs.space`, which answers at once), so the list is rebuilt by itself when files were added or
+  removed; on the RP2350, where that figure takes too long to read, the saved list is used until you
+  rescan. **`r`** (or tapping the title on a touch screen) rescans the card whenever you want. Started
+  with one file (from the file manager), the players don't search at all: they play it, and **`l`**
+  (or the same tap) brings up the whole list. The shared code is `lib/medialist.js`.
 - Make videos with **`tools/convert-videos.sh`** on a computer (needs ffmpeg). It converts
   `.mp4`, `.mkv`, `.mov`, `.webm`... files or whole folders, picking the size and frame rate for
   the board, and can copy them straight to the SD card:
@@ -328,7 +339,9 @@ flash (about 900 KB).
 - `fs.exists(path)`, `fs.remove(path)`, `fs.stat(path)` → `{name, size, dir}` or `null`
 - `fs.mkdir(path)`, `fs.rmdir(path)` (empty folders), `fs.rename(from, to)` (same storage)
 - `fs.copy(from, to)` (any size, also between flash and SD), `fs.space("/" or "/sd")` →
-  `{total, used}`
+  `{total, used}`. On the RP2350 the SD card's `used` is `-1`: working it out reads the card's whole
+  allocation table (25 s on a 32 GB card, and it reset the board before), so `fs.space("/sd", true)`
+  does it on request, with the watchdog off meanwhile
 - `fs.contains(path, text)` searches a file without loading it whole
 - `fs.writeBase64(path, b64, [append])`, `fs.readBase64(path, offset, length)` - binary-safe
   transfer for tools (the web IDE uses them)
@@ -432,8 +445,8 @@ To save about 600 KB of flash, set `-DJS_WIFI=0` in `platformio.ini`.
 | `flappy.js` | tap to flap |
 | `bruce.js` | a Bruce-style tool menu: WiFi analyzer, system monitor, the LED colour mixer, sensor readouts (touch or keyboard) |
 | `files.js` | file manager for the flash and SD card: open, run, view text and pictures (swipe, rotate), play music and videos, copy / move / rename / delete, new folders |
-| `mp3.js` | music player for the `.mp3` files on the SD card |
-| `video.js` | video player for `.avi` files (see "Sound, music and video") |
+| `mp3.js` | music player for the `.mp3` files on the SD card; started from the file manager ("Open in MP3 player") it just plays that file |
+| `video.js` | video player for `.avi` files (see "Sound, music and video"); started from the file manager it just plays that file |
 | `flash.js` | installs `.FLH` and `.bin` firmware files from the SD card (see "Switching firmware") |
 | `calibrate.js` | touch calibration |
 | `edit.js` | a JavaScript editor for keyboard boards (`.edit FILE` in the console) |

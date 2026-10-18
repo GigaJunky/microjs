@@ -2389,15 +2389,39 @@ JS_NATIVE(fs_copy) {  // fs.copy(from, to): any size, also between flash and SD
   if (!ok) b->remove(rb.c_str());  // don't leave half a file (e.g. the card filled up)
   return Value::boolean(ok);
 }
-JS_NATIVE(fs_space) {  // fs.space("/" or "/sd") -> { total, used } in bytes
+JS_NATIVE(fs_space) {  // fs.space("/" or "/sd") -> { total, used } in bytes (RP2350 SD: used -1, see below)
   (void)self;
   std::string path = argc ? I.toStr(args[0]) : "/", rel;
   bool sd = pickFs(path, rel) == (fs::FS*)&SDCARD;
   Object* o = I.newObject();
 #if MICROJS_RP2
-  FSInfo info{};
-  bool got = sd ? sdOk && SDCARD.info(info) : fsOk && LittleFS.info(info);
-  double total = got ? (double)info.totalBytes : 0, used = got ? (double)info.usedBytes : 0;
+  double total = 0, used = 0;
+  if (sd) {
+    // The SD library works out the free space by reading the card's whole allocation table: seconds
+    // on a big card, longer than the watchdog allows (it reset the board). So the total comes at once,
+    // and "used" is -1 (not worked out) unless asked for: fs.space("/sd", true) - the watchdog is off
+    // while it reads.
+    used = -1;
+    if (sdOk) {
+      struct Peek : fs::FS {  // (FS keeps its implementation protected; this adds no data)
+        static fs::FSImplPtr impl(fs::FS& f) { return static_cast<Peek&>(f).getImpl(); }
+      };
+      auto impl = std::static_pointer_cast<sdfs::SDFSImpl>(Peek::impl(SDCARD));
+      total = (double)impl->totalClusters() * (double)impl->clusterSize();
+      if (argc > 1 && I.truthy(args[1])) {
+        FSInfo info{};
+        hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
+        bool got = SDCARD.info(info);
+        watchdog_enable(8000, true);
+        if (got) used = (double)info.usedBytes;
+      }
+    }
+  } else {
+    FSInfo info{};
+    bool got = fsOk && LittleFS.info(info);
+    total = got ? (double)info.totalBytes : 0;
+    used = got ? (double)info.usedBytes : 0;
+  }
 #else
   double total = sd ? (sdOk ? (double)SDCARD.totalBytes() : 0) : (fsOk ? (double)LittleFS.totalBytes() : 0);
   double used = sd ? (sdOk ? (double)SDCARD.usedBytes() : 0) : (fsOk ? (double)LittleFS.usedBytes() : 0);

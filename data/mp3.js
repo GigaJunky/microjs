@@ -11,29 +11,69 @@ const LH = SMALL ? 11 : 18, BAR = SMALL ? 34 : 64, TOP = LH + 4;
 const ROWS = Math.floor((H - TOP - BAR) / LH);
 const BG = lcd.BLACK, PANEL = lcd.color(20, 24, 48), ACCENT = lcd.color(255, 140, 40);
 
-// ---- find the songs
-const songs = [];
-function scan(dir, depth) {
-  let names = [];
-  try { names = fs.list(dir); } catch (e) {}
-  for (const n of names.sort()) {
-    if (n.endsWith("/")) {
-      if (depth < 2 && !n.startsWith(".") && n !== "System Volume Information/") scan(dir + "/" + n.slice(0, -1), depth + 1);
-    } else if (n.toLowerCase().endsWith(".mp3")) songs.push({ path: dir + "/" + n, name: n.slice(0, -4) });
-  }
-}
-scan("/sd", 0);
-
 let sel = 0, top = 0, current = -1, userStopped = false, volume = audio.volume();
+let songs = [], single = false, scanShown = false;
 const title = (i) => (i >= 0 ? songs[i].name + (songs[i].path.split("/").length > 3 ? "  (" + songs[i].path.split("/").slice(2, -1).join("/") + ")" : "") : "");
 const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const fit = (s, px) => { const n = Math.floor(px / (F === 1 ? 6 : 8)); return s.length > n ? s.slice(0, n - 1) + "~" : s; };
+
+// ---- find the songs: from the saved playlist while the card is unchanged, else by scanning (a big
+// card takes seconds: say what is happening, so it doesn't look stuck)
+load("/lib/medialist.js");
+const PLAYLIST = "/sd/playlist.m3u";
+const SY = TOP + 8 + (SMALL ? 14 : 24);
+const songOf = (p) => ({ path: p, name: p.slice(p.lastIndexOf("/") + 1, p.length - 4) });
+function scanStatus(dir, found) {
+  if (!scanShown) {
+    scanShown = true;
+    lcd.fillScreen(BG);
+    lcd.fillRect(0, 0, W, TOP - 2, PANEL);
+    lcd.setTextDatum(lcd.TL);
+    lcd.setTextColor(ACCENT);
+    lcd.drawString("MP3 player", 4, 2, F);
+    lcd.setTextColor(lcd.WHITE);
+    lcd.drawString("Looking for songs...", 4, TOP + 4, F);
+  }
+  const h = SMALL ? 11 : 14;
+  lcd.fillRect(0, SY, W, 2 * h + 2, BG);
+  lcd.setTextDatum(lcd.TL);
+  lcd.setTextColor(lcd.LIGHTGREY);
+  lcd.drawString(fit(dir, W - 8), 4, SY, 1);  // before the listing: a big folder takes a while
+  lcd.setTextColor(lcd.GREENYELLOW);
+  lcd.drawString(found + (found === 1 ? " song" : " songs") + " found", 4, SY + h, 1);
+}
+function loadSongs(rescan) {
+  const wasPlaying = current >= 0, keep = wasPlaying ? songs[current].path : single && songs.length ? songs[0].path : "";
+  scanShown = false;
+  songs = mediaFiles(".mp3", PLAYLIST, scanStatus, rescan).map(songOf);
+  if (keep && !songs.some((x) => x.path === keep)) songs.unshift(songOf(keep));
+  const at = keep ? songs.findIndex((x) => x.path === keep) : -1;
+  current = wasPlaying ? at : -1;
+  sel = Math.max(0, at);
+  top = 0;
+  single = false;
+}
+// r / tapping the title: scan the card again; from a single song (started in the file manager),
+// l / the same tap: list them all. The music goes on meanwhile.
+function reload(rescan) {
+  loadSongs(rescan);
+  shown = "";
+  lcd.fillScreen(BG);
+  drawList();
+  drawBar(true);
+}
+const arg = typeof ARG === "string" && ARG ? ARG : "";
+if (arg) { songs = [songOf(arg)]; single = true; } else loadSongs(false);  // started with a file: no search at all
 
 function drawList() {
   lcd.fillRect(0, 0, W, TOP - 2, PANEL);
   lcd.setTextDatum(lcd.TL);
   lcd.setTextColor(ACCENT);
   lcd.drawString("MP3 player", 4, 2, F);
+  if (mediaFrom === "playlist" && !single) {
+    lcd.setTextColor(lcd.DARKGREY);
+    lcd.drawString("saved list", 12 + lcd.textWidth("MP3 player", F), 3, 1);
+  }
   lcd.setTextDatum(lcd.TR);
   lcd.setTextColor(lcd.LIGHTGREY);
   lcd.drawString(songs.length ? `${sel + 1}/${songs.length}` : "", W - 4, 2, F);
@@ -43,6 +83,7 @@ function drawList() {
     lcd.setTextColor(lcd.LIGHTGREY);
     lcd.drawString(board.hasSd === false ? "No SD card." : "No .mp3 files on the SD card.", 4, TOP + 4, F);
     lcd.drawString("Put some in / or /music.", 4, TOP + 4 + LH, F);
+    lcd.drawString(board.hasTouch ? "Tap the title to look again." : "Press r to look again.", 4, TOP + 4 + 2 * LH, F);
     return;
   }
   if (sel < top) top = sel;
@@ -68,7 +109,7 @@ function drawBar(force) {
   lcd.fillRect(0, y0, W, BAR, PANEL);
   lcd.setTextDatum(lcd.TL);
   lcd.setTextColor(lcd.WHITE);
-  const what = st.error ? "Error: " + st.error : current >= 0 ? title(current) : board.hasMusic ? "Nothing playing" : "No music output on this board";
+  const what = st.error ? "Error: " + st.error : current >= 0 ? title(current) : board.hasMusic ? "Nothing playing - " + (board.hasTouch ? "tap the title to " + (single ? "list all songs" : "rescan the card") : single ? "l lists all songs" : "r rescans the card") : "No music output on this board";
   lcd.drawString(fit(what, W - 8), 4, y0 + 2, 1);
   const py = y0 + (SMALL ? 12 : 14), pw = W - 8;  // progress
   lcd.drawRect(4, py, pw, 5, lcd.DARKGREY);
@@ -121,10 +162,13 @@ keyboard.on("key", ({ key }) => {
   else if (key === "+" || key === "=") setVolume(volume + 10);
   else if (key === "-" || key === "_") setVolume(volume - 10);
   else if (key === "s") { userStopped = true; audio.stop(); current = -1; drawList(); drawBar(true); }
+  else if (key === "r") reload(true);
+  else if (key === "l" && single) reload(false);
 });
 touch.on("down", ({ x, y }) => {
   if (y >= btnY - 2) return [() => play(current - 1), toggle, () => play(current + 1), () => setVolume(volume - 10), () => setVolume(volume + 10)][Math.min(BTNS.length - 1, Math.floor(x / btnW))]();
-  if (y < TOP || y >= H - BAR) return;
+  if (y < TOP) return reload(!single);
+  if (y >= H - BAR) return;
   const i = top + Math.floor((y - TOP) / LH);
   if (i < songs.length) play(i);
 });
@@ -132,6 +176,7 @@ touch.on("down", ({ x, y }) => {
 lcd.fillScreen(BG);
 drawList();
 drawBar(true);
+if (arg) play(0);  // launched with a file (from files.js)
 // redraw the bar as the song plays, and go on to the next song when one ends
 let wasPlaying = false;
 setInterval(() => {

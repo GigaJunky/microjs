@@ -43,7 +43,8 @@ function load(p, keep) {
   if (p === "") {  // the two drives
     const f = fs.space("/"), s = fs.space("/sd");
     items = [{ name: "Flash", dir: true, size: 0, to: "/", info: `${size(f.total - f.used)} free of ${size(f.total)}` }];
-    if (s.total) items.push({ name: "SD card", dir: true, size: 0, to: "/sd", info: `${size(s.total - s.used)} free of ${size(s.total)}` });
+    // (used is -1 where it takes too long to work out - the RP2350 reads a whole FAT for it)
+    if (s.total) items.push({ name: "SD card", dir: true, size: 0, to: "/sd", info: s.used < 0 ? size(s.total) : `${size(s.total - s.used)} free of ${size(s.total)}` });
   } else {
     items = fs.dir(p).sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
     items.unshift({ name: "..", dir: true, up: true });
@@ -168,6 +169,7 @@ function showMenu(it) {
   if (!it.dir) {
     if (e === ".js") list.push(["Run", () => launch(p)]);
     if (e === ".mp3" && board.hasMusic) list.push(["Play", () => { const err = audio.play(p); say(err || "Playing " + it.name + " - s stops"); }]);
+    if (e === ".mp3" && board.hasMusic && fs.exists("/mp3.js")) list.push(["Open in MP3 player", () => launch("/mp3.js", p)]);
     if ((e === ".flh" || e === ".bin") && p.startsWith("/sd")) list.push(["Install firmware...", () => confirm("Open the firmware installer?", "open", () => launch("/flash.js"))]);
     if (PICS.includes(e)) list.push(["View picture", () => showPicture(it)]);
     else if (e === ".avi") list.push(["Play video", () => launch("/video.js", p)]);

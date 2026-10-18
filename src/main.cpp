@@ -381,8 +381,12 @@ static void runLaunched() {
 
 static void runMain() {
   std::string src;
-  if (hwReadFile("/sd/main.js", src)) I->runSafe(src, "/sd/main.js");
-  else if (hwReadFile("/main.js", src)) I->runSafe(src, "/main.js");
+  const char* path = hwReadFile("/sd/main.js", src) ? "/sd/main.js" : hwReadFile("/main.js", src) ? "/main.js" : nullptr;
+  if (!path) return;
+  // as launched apps do: free the source once parsed - the menu is big, and on a board without
+  // PSRAM (the CYD) keeping its 17 KB of text left it too little memory to run
+  I->dropSourceAfterParse = true;
+  I->runSafe(src, path);
 }
 
 #if MICROJS_RP2

@@ -68,9 +68,12 @@ const isEsp = !board.chip || board.chip.startsWith("esp32");
 const usable = (sc) => (board.hasWifi !== false || !fs.contains(sc.path, "@needs-wifi")) &&
   (board.hasWifi !== false || board.network || !fs.contains(sc.path, "@needs-network")) &&
   (isEsp || !fs.contains(sc.path, "@needs-esp32"));
+// An app on the SD card with the same name as one in flash is left out (usually an older copy); on a
+// small board every extra entry costs memory the menu may not have.
+const flashApps = fs.list("/").filter(isScript).sort();
 const allScripts = [
-  ...fs.list("/").filter(isScript).sort().map((f) => ({ name: f, path: "/" + f, sd: false })),
-  ...fs.list("/sd").filter(isScript).sort().map((f) => ({ name: f, path: "/sd/" + f, sd: true })),
+  ...flashApps.map((f) => ({ name: f, path: "/" + f, sd: false })),
+  ...fs.list("/sd").filter((f) => isScript(f) && !flashApps.includes(f)).sort().map((f) => ({ name: f, path: "/sd/" + f, sd: true })),
 ].filter(usable);
 // big apps on a small board (fs.contains searches without loading the file)
 if (board.lowMemory) for (const sc of allScripts) sc.big = fs.contains(sc.path, "@needs-more-memory");

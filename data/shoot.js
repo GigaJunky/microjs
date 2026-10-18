@@ -6,6 +6,7 @@
 // Keys: left / right (or , /) move, Space fires. Gamepad: stick / D-pad moves, button 1 fires.
 // Touch: tap where you want to shoot.
 // @needs-more-memory (big for an original ESP32 without PSRAM: the CYD's launcher hides it at first)
+// @needs-ram (about 135 KB of memory: the menu leaves it out on a board with less - the Cardputer)
 const W = lcd.width(), H = lcd.height(), SMALL = H < 200;
 const S = SMALL ? 0.7 : 1;  // size of everything
 let BAND = 40;

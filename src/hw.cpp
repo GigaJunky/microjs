@@ -496,6 +496,21 @@ static void mp3ApplyVolume() {
   codecSetVolume(v <= 0 ? 0 : 0xBF - (100 - v) * 96 / 100);
 }
 
+// The decoder's buffers are allocated by mp3Start, before the task exists, and handed over: made by the
+// task itself they raced with a video's frame buffer, and on a board without PSRAM (the Cardputer) the
+// sound lost and the video played silent ("not enough memory").
+static uint8_t* mp3In = nullptr;
+static mp3dec_t* mp3Dec = nullptr;
+static int16_t* mp3Pcm = nullptr;
+static size_t mp3InSize = 0;
+static void mp3FreeBuffers() {
+  free(mp3In);
+  free(mp3Dec);
+  free(mp3Pcm);
+  mp3In = nullptr;
+  mp3Dec = nullptr;
+  mp3Pcm = nullptr;
+}
 static void mp3Run(void*) {
   std::string rel;
   fs::FS* fsys = pickFs(mp3Path, rel);
@@ -503,11 +518,10 @@ static void mp3Run(void*) {
   AviStream avi;  // for a video's sound: only the audio chunks
   bool isAvi = mp3AviEnd > 0;
   if (isAvi) avi = AviStream{f, mp3AviStart, mp3AviEnd, 0, 'w', 'b'};
-  const size_t IN = 16 * 1024;
-  uint8_t* in = (uint8_t*)heap_caps_malloc(IN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!in) in = (uint8_t*)malloc(IN);
-  mp3dec_t* dec = (mp3dec_t*)malloc(sizeof(mp3dec_t));
-  int16_t* pcm = (int16_t*)malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
+  const size_t IN = mp3InSize;
+  uint8_t* in = mp3In;
+  mp3dec_t* dec = mp3Dec;
+  int16_t* pcm = mp3Pcm;
   if (!f || !in || !dec || !pcm) mp3Error = !f ? "can't open the file" : "not enough memory";
   else {
     mp3Size = isAvi ? mp3AviEnd - mp3AviStart : f.size();
@@ -549,9 +563,7 @@ static void mp3Run(void*) {
     }
   }
   if (f) f.close();
-  free(in);
-  free(dec);
-  free(pcm);
+  mp3FreeBuffers();
   musicEnd();
   mp3Active = false;
   mp3Task = nullptr;
@@ -573,10 +585,22 @@ static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint
   mp3Stop = mp3Paused = false;
   mp3Pos = mp3Size = mp3Rate = mp3Kbps = mp3Played = 0;
   mp3ApplyVolume();
+  // the input buffer holds a few MP3 frames: 8 KB is enough where memory is short (320 kbps frames
+  // are about 1 KB), 4 KB for a video's sound (one 96 kbps stream, frames of ~300 bytes), 16 KB elsewhere
+  mp3InSize = BOARD_PSRAM ? 16 * 1024 : aviEnd ? 4 * 1024 : 8 * 1024;
+  mp3In = (uint8_t*)heap_caps_malloc(mp3InSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!mp3In) mp3In = (uint8_t*)malloc(mp3InSize);
+  mp3Dec = (mp3dec_t*)malloc(sizeof(mp3dec_t));
+  mp3Pcm = (int16_t*)malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
+  if (!mp3In || !mp3Dec || !mp3Pcm) {
+    mp3FreeBuffers();
+    return "not enough memory to play";
+  }
   mp3Active = true;
   if (xTaskCreatePinnedToCore(mp3Run, "mp3", 20 * 1024, nullptr, 4, &mp3Task, 0) != pdPASS) {
     mp3Active = false;
     mp3Task = nullptr;
+    mp3FreeBuffers();
     return "not enough memory to play";
   }
   return "";
@@ -1732,6 +1756,27 @@ static int vidDraw(JPEGDRAW* d) {
   tft.pushImage(d->x, d->y, d->iWidth, d->iHeight, d->pPixels);
   return 1;
 }
+#if !BOARD_PSRAM
+// Without PSRAM (the Cardputer) a video with sound has no room for a frame buffer: the decoder reads
+// each frame from the SD card in pieces instead (its own 2 KB buffer), the way it reads a file.
+struct VidSrc { File* f; uint32_t base; };
+static int32_t vidRead(JPEGFILE* p, uint8_t* buf, int32_t len) {
+  int32_t left = p->iSize - p->iPos;
+  if (len > left) len = left;
+  if (len <= 0) return 0;
+  int32_t n = ((VidSrc*)p->fHandle)->f->read(buf, len);
+  if (n > 0) p->iPos += n;
+  return n < 0 ? 0 : n;
+}
+static int32_t vidSeek(JPEGFILE* p, int32_t pos) {
+  if (pos < 0) pos = 0;
+  else if (pos >= p->iSize) pos = p->iSize - 1;
+  VidSrc* s = (VidSrc*)p->fHandle;
+  if (s->f->seek(s->base + pos)) p->iPos = pos;
+  return p->iPos;
+}
+static void vidClose(void*) {}
+#endif
 static void vidRun(void*) {
   std::string rel;
   fs::FS* fsys = pickFs(vidPath, rel);
@@ -1803,16 +1848,27 @@ static void vidRun(void*) {
       if (!vs.next(size)) { vidEnded = vs.pos + 8 > vs.end ? "end" : "couldn't read the next frame"; break; }
       uint32_t due = (uint64_t)n * vidInfo.usPerFrame / 1000, frameMs = vidInfo.usPerFrame / 1000;
       if (n && now() > due + 2 * frameMs) { vidDropped++; continue; }  // running late: skip this one
+#if BOARD_PSRAM
       if (size > bufSize) {
         free(buf);
         bufSize = size + 4096;
         buf = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) buf = (uint8_t*)malloc(bufSize);
-        if (!buf) { vidError = "not enough memory for a frame"; break; }
+        if (!buf) {
+          vidError = "not enough memory for a frame (" + std::to_string(bufSize / 1024) + " KB wanted, largest free " +
+                     std::to_string(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024) + " KB)";
+          break;
+        }
       }
       if (vs.f.read(buf, size) != (int)size) { vidEnded = "a frame was cut short"; break; }
+#endif
       while (!vidStop && !vidPaused && now() + 2 < due) vTaskDelay(1);  // early: wait for its time
+#if BOARD_PSRAM
       if (jpeg->openRAM(buf, size, vidDraw)) {
+#else
+      VidSrc src{&vs.f, (uint32_t)vs.f.position()};  // vs.next() left the file at this frame's data
+      if (jpeg->open(&src, size, vidClose, vidRead, vidSeek, vidDraw)) {
+#endif
         jpeg->setPixelType(bigEndian ? RGB565_BIG_ENDIAN : RGB565_LITTLE_ENDIAN);
         if (vidDma) tft.startWrite();
         jpeg->decode(x0, y0, opt);
@@ -2754,6 +2810,7 @@ static void bootStep(int n) {
 #define BOOT_STEP(n)
 #endif
 
+static uint32_t bootRoomKB = 0;  // free memory (and PSRAM) as the first interpreter starts, before any app: board.ramKB
 void hwBegin() {
 #if MICROJS_RP2
   uint32_t last = watchdog_hw->scratch[5];
@@ -2819,7 +2876,7 @@ void hwBegin() {
   pinMode(BOARD_SD_MISO, INPUT_PULLUP);        // DAT0/MISO needs a pull-up to read reliably
   static SPIClass sdSpi(BOARD_SD_SPI_HOST);  // its own bus: the display has the other one
   sdSpi.begin(BOARD_SD_SCK, BOARD_SD_MISO, BOARD_SD_MOSI, BOARD_SD_CS);
-  sdOk = SD.begin(BOARD_SD_CS, sdSpi);
+  sdOk = SD.begin(BOARD_SD_CS, sdSpi, BOARD_SD_HZ);
 #endif
   }
   BOOT_STEP(5) {
@@ -3397,6 +3454,7 @@ static const NativeEntry LAZY_bhttp[] = {{"get", bhttp_get}, {"post", bhttp_post
 #endif
 
 void hwInstall(Interp& I) {
+  if (!bootRoomKB) bootRoomKB = (ESP.getFreeHeap() + (psramFound() ? ESP.getPsramSize() : 0)) / 1024;
   // drawing methods shared by the screen and sprites
   Object* G = I.newObject();
   G->lazy = LAZY_G;
@@ -3489,6 +3547,7 @@ void hwInstall(Interp& I) {
     I.setOwn(board, "id", I.str(id));
   }
   I.setOwn(board, "lowMemory", Value::boolean(hwLowMemory()));  // too small for @needs-more-memory apps
+  I.setOwn(board, "ramKB", Value::num(bootRoomKB));  // memory an app can count on: free heap + PSRAM, in KB, at boot
   I.setOwn(board, "hasBattery", Value::boolean(BOARD_BATTERY_ADC >= 0));
   I.setOwn(board, "hasMusic", Value::boolean(HAS_MUSIC));
   I.setOwn(board, "hasWifi", Value::boolean(JS_WIFI));

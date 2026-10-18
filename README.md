@@ -542,6 +542,11 @@ clock - WiFi alone takes about 40 KB) is big for an original ESP32 without PSRAM
 launcher hides them at first ("edit list" or "+ N hidden" shows them). They may run out of memory
 there.
 
+**Apps that can't run on a small board at all:** the dungeon and shooting games carry a `@needs-ram`
+comment: they want about 135 KB of memory and fail with "out of memory" on less, so the menu leaves
+them out of the list (`board.ramKB` is the memory - free heap plus PSRAM - measured at boot: about 124
+on the Cardputer, 147 on the RP2350, thousands on the PSRAM boards).
+
 **The classic CYD is a limited board.** With no PSRAM it has about 100 KB for scripts, and the
 games and small apps run well; the big apps above, and anything using WiFi, are at the edge of its
 memory and may stop with "out of memory". Boards with PSRAM (the S3 CYD, the CoCo VGA board, the

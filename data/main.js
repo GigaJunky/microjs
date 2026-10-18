@@ -8,7 +8,8 @@
 // lightning bolt (or a +) while it charges from a computer's USB port.
 // Hide apps you don't use: "edit list" (the last entry) ticks each app shown or hidden, and
 // "+ N hidden" shows the hidden ones (in orange) for a while; kept in /launcher.json. A board too
-// small for the big apps (@needs-more-memory: the classic CYD) starts with those hidden.
+// small for the big apps (@needs-more-memory: the classic CYD) starts with those hidden; apps that
+// can't run at all on a board with little memory (@needs-ram) aren't listed there.
 const W = lcd.width(), H = lcd.height();
 
 // ---- sound setting
@@ -65,7 +66,12 @@ const isScript = (f) => f.endsWith(".js") && f !== "main.js" && (board.hasTouch 
 // can't work there)
 const isEsp = !board.chip || board.chip.startsWith("esp32");
 // @needs-network apps only fetch from the web, which also works through a computer (board.network "usb")
-const usable = (sc) => (board.hasWifi !== false || !fs.contains(sc.path, "@needs-wifi")) &&
+// @needs-ram apps (the dungeon and shooting games) want about 135 KB to themselves - free heap and PSRAM
+// together, as board.ramKB measures at boot - and fail with "out of memory" on a board with less (the
+// Cardputer), so they're left out there
+const roomKB = board.ramKB || 0;
+const usable = (sc) => (roomKB >= 135 || !fs.contains(sc.path, "@needs-ram")) &&
+  (board.hasWifi !== false || !fs.contains(sc.path, "@needs-wifi")) &&
   (board.hasWifi !== false || board.network || !fs.contains(sc.path, "@needs-network")) &&
   (isEsp || !fs.contains(sc.path, "@needs-esp32"));
 // An app on the SD card with the same name as one in flash is left out (usually an older copy); on a

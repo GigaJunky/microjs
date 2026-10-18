@@ -7,6 +7,7 @@
 // the map, R toggles 1982 mode. Gamepad: D-pad walks, button 1 attacks, button 2 map, button 3 1982.
 // Touch: left / right third turns, top middle walks, bottom middle attacks.
 // @needs-more-memory (big for an original ESP32 without PSRAM: the CYD's launcher hides it at first)
+// @needs-ram (about 135 KB of memory: the menu leaves it out on a board with less - the Cardputer)
 const W = lcd.width(), H = lcd.height(), SMALL = H < 200;
 const HUD = SMALL ? 15 : 24, VW = W, VH = H - HUD, CX = VW / 2, CY = VH / 2;
 let BAND = 40;

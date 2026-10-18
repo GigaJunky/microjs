@@ -159,6 +159,9 @@
 #define BOARD_SD_MOSI 23
 #define BOARD_SD_CS 5
 #endif
+#ifndef BOARD_SD_HZ
+#define BOARD_SD_HZ 4000000  // SPI clock of an SD card on its own pins (the Arduino default); faster where the wiring allows
+#endif
 #ifndef BOARD_SD_SPI_HOST          // SPI peripheral for the card (not the one the display uses)
 #define BOARD_SD_SPI_HOST VSPI
 #endif

@@ -35,7 +35,17 @@ function drawBar() {
 // Keyboard painting works on a grid of G x G blocks, remembered in `blocks` so the cursor can
 // be drawn over the picture and the block underneath repainted when it moves.
 const G = 4, GC = Math.floor(W / G), GR = Math.floor((H - BAR) / G);
-const blocks = new Array(board.hasKeyboard ? GC * GR : 0).fill(0);  // (~60 KB: not on a touch-only CYD)
+// Each block is black (0) or a palette colour (1-8): 4 bits, eight to a number - a plain array of
+// colours took ~66 KB, more than the CYD or RP2350 could spare. Only boards with a keyboard use it.
+const blocks = new Array(board.hasKeyboard ? Math.ceil((GC * GR) / 8) : 0).fill(0);
+function getBlock(i) {
+  const v = (blocks[i >> 3] >>> ((i & 7) * 4)) & 15;
+  return v ? palette[v - 1] : lcd.BLACK;
+}
+function setBlock(i, c) {
+  const v = c === lcd.BLACK ? 0 : palette.indexOf(c) + 1, shift = (i & 7) * 4;
+  blocks[i >> 3] = (blocks[i >> 3] & ~(15 << shift)) | (v << shift);
+}
 let cx = Math.floor(GC / 2), cy = Math.floor(GR / 2);
 
 function paintBlock(x, y, c) { lcd.fillRect(x * G, BAR + y * G, G, G, c); }
@@ -43,7 +53,7 @@ function drawCursor() { lcd.drawRect(cx * G - 1, BAR + cy * G - 1, G + 2, G + 2,
 function hideCursor() {
   for (let y = cy - 1; y <= cy + 1; y++)
     for (let x = cx - 1; x <= cx + 1; x++)
-      if (x >= 0 && y >= 0 && x < GC && y < GR) paintBlock(x, y, blocks[y * GC + x]);
+      if (x >= 0 && y >= 0 && x < GC && y < GR) paintBlock(x, y, getBlock(y * GC + x));
   if (cy === 0) drawBar();
 }
 
@@ -77,15 +87,15 @@ setInterval(() => {  // held keys: move one block per tick, paint while Space is
   const dx = (keys.includes("right") ? 1 : 0) - (keys.includes("left") ? 1 : 0) + hx + step(pad.x);
   const dy = (keys.includes("down") ? 1 : 0) - (keys.includes("up") ? 1 : 0) + hy + step(pad.y);
   const pen = keys.includes(" ") || (pad.buttons & 1);
-  if (!dx && !dy && !(pen && blocks[cy * GC + cx] !== color)) return;
+  if (!dx && !dy && !(pen && getBlock(cy * GC + cx) !== color)) return;
   // move one block at a time, so painting at full speed still leaves a solid line
   const steps = Math.max(1, Math.abs(dx), Math.abs(dy));
   for (let i = 0; i < steps; i++) {
     hideCursor();
-    if (pen) blocks[cy * GC + cx] = color;
+    if (pen) setBlock(cy * GC + cx, color);
     cx = Math.max(0, Math.min(GC - 1, cx + Math.sign(dx) * (i < Math.abs(dx) ? 1 : 0)));
     cy = Math.max(0, Math.min(GR - 1, cy + Math.sign(dy) * (i < Math.abs(dy) ? 1 : 0)));
-    if (pen) blocks[cy * GC + cx] = color;
+    if (pen) setBlock(cy * GC + cx, color);
     hideCursor();  // repaints the new neighbourhood too, then the cursor goes on top
   }
   drawCursor();

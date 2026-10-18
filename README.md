@@ -365,7 +365,8 @@ allows 8 symbols per minute and 800 per day.
 **Boards wired differently.** Some CYDs have the red LED on GPIO 22 instead of 4, and their speaker
 amplifier is switched on by GPIO 4 held low. For those, add
 `"ledPins": [22, 16, 17]` (red, green, blue) and `"speakerEnable": [4, 0]` (pin, level) - read at
-every boot. (Don't add `speakerEnable` on a standard CYD: there GPIO 4 is the red LED.)
+every boot. (Don't add `speakerEnable` on a standard CYD: there GPIO 4 is the red LED.) Both apply
+only to the classic CYDs, so a `micro-js.json` shared on an SD card is safe in the other boards.
 
 `utcOffsetHours` is your time zone as hours from UTC (e.g. `-5`, `1`, `5.5`); change it by one
 when daylight saving starts or ends. `fetch.js` and `clock.js` read their WiFi, clock offset,

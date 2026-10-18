@@ -2451,8 +2451,12 @@ static void ledPinsFromConfig() {
 }
 
 // "speakerEnable": [pin, level] in micro-js.json drives a pin at boot that switches the speaker's
-// amplifier on (CYDs that moved the red LED to GPIO 22 use GPIO 4, LOW, for this)
+// amplifier on (CYDs that moved the red LED to GPIO 22 use GPIO 4, LOW, for this). Only on the
+// classic CYDs (an original ESP32 with a PWM speaker): a micro-js.json shared on an SD card would
+// otherwise drive that pin on other boards too - on the S3 CYD GPIO 4 is the audio codec's clock
+// (no sound), on the CoCo VGA board a colour line.
 static void speakerEnableFromConfig() {
+#if CONFIG_IDF_TARGET_ESP32 && BOARD_SPEAKER_PWM >= 0
   for (const char* path : CONFIG_PATHS) {
     std::string text;
     if (!hwReadFile(path, text)) continue;
@@ -2469,6 +2473,7 @@ static void speakerEnableFromConfig() {
     digitalWrite(pin, level ? HIGH : LOW);
     return;
   }
+#endif
 }
 
 static void setTimeZoneFromConfig() {

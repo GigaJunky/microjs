@@ -1,4 +1,5 @@
 // fetch.js - the data fetcher for the weather/stocks/news dashboard.
+// @needs-network
 //
 // The only app that uses the network. It pulls each feed and writes it to its own small file on
 // the SD card (or flash); the display app (weather.js) renders from those files with no WiFi
@@ -39,7 +40,8 @@ const SELF = sibling("fetch.js"), DISPLAY = sibling("weather.js");
 // News uses HTTPS by default, which needs ~40 KB of contiguous heap for the TLS handshake - more
 // than a board without PSRAM (e.g. the CYD) has free once WiFi is up. So skip news on low-memory
 // boards unless the user pointed "news" at their own (plain-http) feed.
-const newsOk = cfg.news !== false && (board.psram || (cfg.news && cfg.news.url));
+// (through the computer - board.network "usb" - the computer does the TLS, so news works there too)
+const newsOk = cfg.news !== false && (board.psram || board.network === "usb" || (cfg.news && cfg.news.url));
 const STAGES = [];
 if (newsOk) STAGES.push("news");
 if (ST.apiKey && SYMBOLS.length) STAGES.push("stocks");
@@ -105,11 +107,11 @@ function doStage(name) {
 
 function run() {
   if (wifi.status() !== "connected") {
-    msg(`connecting to ${WIFI.ssid}...`);
+    msg(board.network === "usb" ? "waiting for tools/bridge.js on the computer..." : `connecting to ${WIFI.ssid}...`);
     led(0, 0, 20);
     if (!wifi.connect(WIFI.ssid, WIFI.pass, 20000)) {
       led(0, 0, 0);
-      msg("WiFi failed - retry in 30 s", lcd.RED);
+      msg(board.network === "usb" ? "No network - open the web IDE or run npm run bridge" : "WiFi failed - retry in 30 s", lcd.RED);
       return setTimeout(run, 30000);
     }
     wifi.ntp("UTC0");  // board clock; it keeps running in the display app with WiFi off
@@ -134,5 +136,5 @@ function run() {
   }
 }
 
-if (!WIFI.ssid) msg("Set wifi.ssid and wifi.pass in micro-js.json", lcd.ORANGE);
+if (!WIFI.ssid && board.network !== "usb") msg("Set wifi.ssid and wifi.pass in micro-js.json", lcd.ORANGE);
 else run();

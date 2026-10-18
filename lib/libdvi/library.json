@@ -1,0 +1,9 @@
+{
+  "name": "libdvi",
+  "version": "0.0.0",
+  "description": "DVI (HDMI) video output from RP2040/RP2350 PIO - libdvi from Luke Wren's PicoDVI",
+  "license": "BSD-3-Clause",
+  "frameworks": "arduino",
+  "platforms": "raspberrypi",
+  "build": { "srcDir": "src", "includeDir": "src" }
+}

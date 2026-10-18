@@ -2,7 +2,7 @@
 #include "version.h"
 #include <Arduino.h>
 #include <new>
-#include <esp_heap_caps.h>
+#include "port.h"
 #include "board.h"
 #include "js.h"
 #include "hw.h"
@@ -26,6 +26,7 @@ static bool consoleShown = false;
 
 // true once per press of the BOOT button
 static bool bootPressed() {
+  if (PIN_BOOT < 0) return false;  // no BOOT button the firmware can read (RP2350: it's the flash's)
   bool down = digitalRead(PIN_BOOT) == LOW;
   uint32_t now = millis();
   if (down == bootDown || now - bootChanged < 50) return false;
@@ -54,9 +55,34 @@ static void onNewFailure() {
 
 // REPL output goes to the serial port and, on boards with a keyboard, to the on-screen console
 static void term(const char* s, size_t n) {
-  Serial.write((const uint8_t*)s, n);
+  replSerial.write((const uint8_t*)s, n);
   hwConsoleWrite(s, n);
 }
+// Lines starting with STX (0x02) come from tools/bridge.js (network and clock through the computer,
+// MICROJS_BRIDGE): they go to hwBridgeLine(), never to the REPL. true = the byte was one of theirs.
+static bool bridgeByte(int c) {
+#if MICROJS_BRIDGE
+  static bool in = false;
+  static std::string msg;
+  if (!in) {
+    if (c != 2) return false;
+    in = true;
+    msg.clear();
+    return true;
+  }
+  if (c == '\n' || c == '\r') {
+    in = false;
+    hwBridgeLine(msg);
+  } else if (msg.size() < 600 * 1024) {
+    msg += (char)c;
+  }
+  return true;
+#else
+  (void)c;
+  return false;
+#endif
+}
+
 static void out(const char* s) { term(s, strlen(s)); }
 static void out(const std::string& s) { term(s.data(), s.size()); }
 
@@ -103,8 +129,9 @@ static void newInterp() {
       hwStop(*I);
       throw js::JsInterrupt();
     }
-    while (Serial.available()) {
-      int c = Serial.read();
+    while (replSerial.available()) {
+      int c = replSerial.read();
+      if (bridgeByte(c)) continue;
       if (c == 3) {  // Ctrl-C aborts the running script and stops timers & handlers
         pending.clear();
         I->clearTimers();
@@ -115,7 +142,7 @@ static void newInterp() {
     }
     hwService();
     uint32_t now = millis();
-    if (now - lastYield > 100) {  // let the idle task run (watchdog)
+    if (now - lastYield > (MICROJS_RP2 ? 10 : 100)) {  // let the idle task run (watchdog); RP2350: music and video
       lastYield = now;
       vTaskDelay(1);
     }
@@ -246,7 +273,11 @@ static int readByte() {
     pending.erase(0, 1);
     return c;
   }
-  return Serial.available() ? Serial.read() : -1;
+  while (replSerial.available()) {
+    int c = replSerial.read();
+    if (!bridgeByte(c)) return c;
+  }
+  return -1;
 }
 
 static void pollRepl() {
@@ -354,11 +385,26 @@ static void runMain() {
   else if (hwReadFile("/main.js", src)) I->runSafe(src, "/main.js");
 }
 
+#if MICROJS_RP2
+// Call fn(nullptr) with the stack pointer at top (8-byte aligned); fn never returns here.
+__attribute__((naked, noinline)) static void runOnStack(void (*fn)(void*), void* top) {
+  asm volatile(
+      "mov sp, r1\n"
+      "mov r1, r0\n"
+      "movs r0, #0\n"
+      "blx r1\n"
+      "1: b 1b\n");
+}
+#endif
+
 static void jsTask(void*) {
+#if MICROJS_RP2
+  hwBegin();  // here, on the big stack: formatting the filesystem alone overflows the core's 4 KB
+#endif
   newInterp();
   hwSplash();
-  out("\r\nmicro-js " MICROJS_VERSION " - JavaScript for ESP32 display boards (" BOARD_NAME "). Type .help\r\n");
-  bootDown = digitalRead(PIN_BOOT) == LOW;
+  out("\r\nmicro-js " MICROJS_VERSION " - JavaScript for microcontroller display boards (" BOARD_NAME "). Type .help\r\n");
+  bootDown = PIN_BOOT >= 0 && digitalRead(PIN_BOOT) == LOW;
   if (!bootDown) runMain();
   else out("BOOT held: skipping main.js\r\n");
   prompt();
@@ -407,9 +453,11 @@ static void jsTask(void*) {
 }
 
 void setup() {
+#if !MICROJS_RP2  // (the RP2350's USB serial buffers on its own)
   Serial.setRxBufferSize(1024);
+#endif
   Serial.begin(115200);
-  pinMode(PIN_BOOT, INPUT_PULLUP);
+  if (PIN_BOOT >= 0) pinMode(PIN_BOOT, INPUT_PULLUP);
   // the interpreter's memory regions: in PSRAM when the board has it, else internal RAM
   uint32_t caps = BOARD_PSRAM && psramFound() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_8BIT;
   js::poolReserve(BOARD_POOL_KB * 1024, heap_caps_malloc(BOARD_POOL_KB * 1024, caps));
@@ -423,8 +471,21 @@ void setup() {
     };
   parachute = malloc(PARACHUTE);
   std::set_new_handler(onNewFailure);
+#if !MICROJS_RP2
   hwBegin();
+#endif
+#if MICROJS_RP2
+  // No RTOS: the interpreter runs right here on core 0 (core 1 makes the picture), but the core's
+  // own stack is only 4 KB, so switch to a big one of our own first.
+  static uint8_t* stack = (uint8_t*)malloc(JS_STACK);
+  runOnStack(jsTask, stack + (JS_STACK & ~7u));
+#else
   xTaskCreatePinnedToCore(jsTask, "js", JS_STACK, nullptr, 1, nullptr, 1);
+#endif
 }
 
-void loop() { vTaskDelete(nullptr); }
+void loop() {
+#if !MICROJS_RP2
+  vTaskDelete(nullptr);
+#endif
+}

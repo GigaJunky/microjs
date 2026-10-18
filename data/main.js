@@ -59,12 +59,19 @@ function speaker(x, y, c) {
     lcd.drawArc(x + 11, y + 10, 10, 9, 225, 315, c, lcd.BLACK, false);
   }
 }
-const TOUCH_ONLY = ["controls.js"];  // hidden on boards without a touch screen
+const TOUCH_ONLY = ["controls.js", "calibrate.js"];  // hidden on boards without a touch screen
 const isScript = (f) => f.endsWith(".js") && f !== "main.js" && (board.hasTouch || !TOUCH_ONLY.includes(f));
+// apps marked @needs-wifi don't show on a board without WiFi, @needs-esp32 on other chips (they
+// can't work there)
+const isEsp = !board.chip || board.chip.startsWith("esp32");
+// @needs-network apps only fetch from the web, which also works through a computer (board.network "usb")
+const usable = (sc) => (board.hasWifi !== false || !fs.contains(sc.path, "@needs-wifi")) &&
+  (board.hasWifi !== false || board.network || !fs.contains(sc.path, "@needs-network")) &&
+  (isEsp || !fs.contains(sc.path, "@needs-esp32"));
 const allScripts = [
   ...fs.list("/").filter(isScript).sort().map((f) => ({ name: f, path: "/" + f, sd: false })),
   ...fs.list("/sd").filter(isScript).sort().map((f) => ({ name: f, path: "/sd/" + f, sd: true })),
-];
+].filter(usable);
 // big apps on a small board (fs.contains searches without loading the file)
 if (board.lowMemory) for (const sc of allScripts) sc.big = fs.contains(sc.path, "@needs-more-memory");
 

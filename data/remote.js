@@ -13,6 +13,7 @@
 // is still free; on boards without PSRAM (the CYD, the Cardputer) there usually isn't, so the screen
 // shows a simple swatch and the page does the mixing.
 // @needs-more-memory (big for an original ESP32 without PSRAM: the CYD's launcher hides it at first)
+// @needs-wifi
 // WiFi first (it needs ~50 KB of its own), then the full mixer if there's still room for it
 function loadMixer() {
   const h = sys.heap();

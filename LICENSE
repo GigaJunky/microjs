@@ -27,6 +27,8 @@ repository keeps its own licence:
   host/stb_image.h       nothings/stb - public domain or MIT (your choice)
   lib/SoftUSB/           ESP32-USB-Soft-Host - AGPL-3.0 (lib/SoftUSB/LICENSE)
   lib/ESP32-S3-VGA/      bitluni's ESP32-S3-VGA - see lib/ESP32-S3-VGA/NOTICE.md
+  lib/libdvi/            libdvi from Luke Wren's PicoDVI - BSD-3-Clause (lib/libdvi/LICENSE)
+  lib/PicoPIOUSB/        sekigon-gonnoc's Pico-PIO-USB - MIT (lib/PicoPIOUSB/LICENSE)
 Firmware built with the coco-vga profile includes the AGPL-3.0 USB host, so
 that firmware as a whole is distributed under the AGPL-3.0; its complete
 source is this repository.

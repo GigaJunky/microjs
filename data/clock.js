@@ -13,7 +13,7 @@ let offset = 12 * 3600 * 1000;  // fallback time base
 lcd.fillScreen(BG);
 lcd.setTextDatum(lcd.MC);
 lcd.setTextColor(lcd.WHITE, BG);
-if (WIFI.ssid) {
+if ((WIFI.ssid && board.hasWifi !== false) || board.network === "usb") {  // usb: through the computer
   lcd.drawString("connecting...", W / 2, H / 2, 2);
   if (wifi.connect(WIFI.ssid, WIFI.pass) && wifi.ntp("UTC0")) console.log("time synced");
   else console.log("no network time, using fallback");

@@ -17,6 +17,7 @@ void hwWifiPrepare(bool use);       // start (or stop) the WiFi driver before a 
 void hwNetReserve();                // set aside memory for HTTP requests (call after parsing)
 void hwNetRelease();                // free that reserve (before loading the next script)
 void hwSplash();                    // boot screen
+void hwBridgeLine(const std::string& line);  // a message from tools/bridge.js (MICROJS_BRIDGE)
 void hwKeyEvent(const char* key, bool down, uint8_t mods);  // external keyboard drivers (KEYBOARD_EXTERNAL)
 void hwExternalKeyboardBegin();     // implemented by an external keyboard driver, if any
 bool hwMenuKey();                   // true once after a "back to the menu" key (F12, Escape)

@@ -75,8 +75,8 @@ function bars(x, y, rssi) {
   }
 }
 
-// ---- Tool: WiFi analyzer
-tools.push({
+// ---- Tool: WiFi analyzer (boards with WiFi)
+if (board.hasWifi !== false) tools.push({
   icon: "W", name: "WiFi scan",
   title: "WiFi scan", every: 6000,
   nets: null,
@@ -118,7 +118,7 @@ tools.push({
       ["min free", kb(h.minFree)],
       ["largest blk", kb(h.largest)],
       ["js heap", kb(h.js)],
-      ["wifi", wifi.status()],
+      ["wifi", board.hasWifi !== false ? wifi.status() : "none"],
     ];
     rows.forEach(([k, v], i) => {
       const y = TOP + 4 + i * (SMALL ? 14 : 18);

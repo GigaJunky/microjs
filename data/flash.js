@@ -5,6 +5,7 @@
 // Files in folders on the card (up to three deep) are listed too.
 // The scripts on the board's flash are kept. Boards without a spare slot (the classic CYD) can't.
 // Keys: up / down choose, Enter (or Space / button 1) shows the file, Y installs, N or Escape goes back.
+// @needs-esp32 (an RP2350 board takes new firmware as a .uf2 file instead)
 const W = lcd.width(), H = lcd.height(), SMALL = H < 200, F = SMALL ? 1 : 2, LH = SMALL ? 11 : 18;
 const isFirmware = (f) => [".FLH", ".BIN"].includes(f.slice(-4).toUpperCase());
 const SKIP = ["System Volume Information/", "FOUND.000/", "LOST.DIR/"];

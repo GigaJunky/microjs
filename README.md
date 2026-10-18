@@ -1,10 +1,11 @@
-# micro-js — JavaScript for ESP32 display boards
+# micro-js — JavaScript for microcontroller display boards
 
-A JavaScript interpreter written from scratch for ESP32 boards with a screen. It started on the
-**ESP32-2432S028R** ("Cheap Yellow Display", CYD): a 2.8" 320×240 ILI9341 touchscreen, RGB
+A JavaScript interpreter written from scratch for microcontroller boards with a screen. It started
+on the **ESP32-2432S028R** ("Cheap Yellow Display", CYD): a 2.8" 320×240 ILI9341 touchscreen, RGB
 LED, speaker output, light sensor and SD slot on one ESP32 board. It also runs on the ESP32-S3
-version of the CYD, the M5Stack Cardputer ADV and mast4rbug's ESP32-CoCo VGA board, and other
-boards can be added (see "Supported boards").
+version of the CYD, the M5Stack Cardputer ADV, mast4rbug's ESP32-CoCo VGA board and the Waveshare
+RP2350-PiZero (HDMI output, USB keyboards and gamepads), and other boards can be added (see
+"Supported boards").
 
 You can type JavaScript into a serial REPL and see it on the screen right away. You can also
 save scripts to flash or SD and have one start at boot.
@@ -58,6 +59,7 @@ setInterval(() => led(0, Math.random() * 40, 0), 200);
 | `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery |
 | `cardputer-adv` | M5Stack Cardputer ADV: ESP32-S3, 240×135 ST7789, 56-key keyboard, ES8311 audio, battery, no touch, no PSRAM | tested: display, keyboard, sound, LED, SD |
 | `coco-vga` | [ESP32-CoCo](https://github.com/mast4rbug/ESP32-CoCo) board: ESP32-S3, VGA output, USB keyboards and gamepads, SD, PWM sound | tested (see "The ESP32-CoCo VGA board") |
+| `rp2350-pizero` | Waveshare RP2350-PiZero: RP2350B (520 KB RAM, 16 MB flash), mini HDMI out, USB keyboards and gamepads (hubs work), microSD, PWM sound on a header pin; **no WiFi or Bluetooth** | tested: HDMI, USB keyboard and gamepad, SD, flash, network and clock through the computer (see "The RP2350-PiZero") |
 | `esp32s3-28-template` | other ESP32-S3 2.8" boards with 8 MB PSRAM, ILI9341 + FT6336U capacitive touch (Hosyond, Freenove, MELIFE style) | template: pins are placeholders until a board is in hand |
 
 Each profile is a `[env:...]` section in `platformio.ini`. It holds the display settings
@@ -78,7 +80,9 @@ that profile (see `[env]` in `platformio.ini`).
 Scripts can see what the board has through `board`:
 `board.name`, `board.touch` (`"resistive"`, `"capacitive"` or `"none"`), `board.hasTouch`, `board.hasKeyboard`,
 `board.hasLed`, `board.hasSpeaker`, `board.hasMusic` (MP3 and video sound),
-`board.hasLight`, `board.hasSd`, `board.hasBattery`, `board.psram` (bytes).
+`board.hasLight`, `board.hasSd`, `board.hasBattery`, `board.hasWifi`, `board.psram` (bytes),
+`board.chip` (`"esp32"`, `"esp32s3"` or `"rp2350"`). The launcher leaves out apps marked
+`@needs-wifi` on boards without WiFi and `@needs-esp32` on other chips.
 
 ## Build and flash
 
@@ -115,7 +119,9 @@ there. `tools/version-state.json` remembers the last fingerprint - keep it with 
 **Without PlatformIO:** ready-made images for every board are on the releases page (built with
 `tools/build_release.sh`). Flash one at address 0 with
 [esptool-js](https://espressif.github.io/esptool-js/) in Chrome or Edge: `micro-js-<version>-<board>-full.bin` has
-the firmware and the apps, `-app.bin` only the firmware (keeps the apps on the board).
+the firmware and the apps, `-app.bin` only the firmware (keeps the apps on the board). The
+RP2350-PiZero takes `.uf2` files instead: hold its BOOT button while plugging it into a computer,
+and drag `micro-js-<version>-rp2350-pizero-full.uf2` (or `-app.uf2`) onto the drive that appears.
 
 ## Using it
 
@@ -234,13 +240,13 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   five targets, check, and Save - it's stored in `/touchcal.json` and loaded at every start.
   (The resistive CYD's old form, `touch.calibrate(xMin, xMax, yMin, yMax)`, still works.)
 
-### `joystick` (USB gamepads, VGA board)
+### `joystick` (USB gamepads: VGA board, RP2350-PiZero)
 
 - `joystick.read(n = 0)` returns `{connected, x, y, x2, y2, hat, buttons, raw}`:
   - `x`/`y` and `x2`/`y2` are the two sticks, from −1 to 1.
   - `hat` is the D-pad: −1 when centred, otherwise 0–7 clockwise from up.
   - `buttons` is a bit mask, with button 1 as bit 0.
-- `joystick.count()` gives the number of pads connected (up to two, one per USB port).
+- `joystick.count()` gives the number of pads connected (up to two).
 - `joystick.on("press" | "release", ({joystick, button}) => …)` fires on button changes;
   `joystick.off([event])` removes the handler.
 - `joystick.keys(false)` stops the D-pad and buttons from also acting as arrow keys, Space and
@@ -645,6 +651,50 @@ hardware, built for a TRS-80 Color Computer emulator: an ESP32-S3 with VGA outpu
 - After editing `vga_screen.h`, delete `.pio/build/coco-vga/src/hw.cpp.o`: `hw.cpp` includes it
   through a macro, so the build doesn't notice.
 
+## The RP2350-PiZero
+
+Profile `rp2350-pizero` runs micro-js on Waveshare's [RP2350-PiZero](https://www.waveshare.com/wiki/RP2350-PiZero),
+a Raspberry Pi Zero-sized board with the RP2350B chip (two 252 MHz Cortex-M33 cores here, 520 KB
+RAM, 16 MB flash, no PSRAM). It has **no WiFi or Bluetooth**; it gets its clock and the web
+through the computer it's plugged into instead (below). There's no `web` server object, so
+`remote` doesn't show in its launcher.
+
+- **Screen:** the mini HDMI port, as DVI: 640×480 at 60 Hz, showing a 320×240 picture with every
+  pixel doubled. The RP2350 makes the signal itself - core 1 does nothing else - with Luke Wren's
+  [libdvi](https://github.com/Wren6991/PicoDVI) on PIO 0 (GPIO 32-39). The screen is a full-screen
+  8-bit (256-colour) sprite (`src/boards/rp2350-pizero/dvi_screen.h`), so every font and drawing
+  call works as on the CYD; 16-bit (`-DDVI_DEPTH=16`) costs 75 KB more RAM and made core 1 miss
+  lines (a missed line shows as a red stripe). Most monitors and TVs with HDMI take it (it's DVI: no sound over the cable yet).
+- **Keyboards and gamepads** go in the USB-C port marked **PIO-USB** (GPIO 28/29); use a USB-C to
+  USB-A adapter for ordinary plugs, and a simple USB hub for a keyboard and a gamepad together.
+  Full-speed and low-speed devices work. The other USB-C port is power and the REPL. F12 or
+  Escape: menu; Ctrl+C: console. The board can't switch that port's power, so plug devices in
+  before powering up (or plug them into a hub).
+- **Sound:** PWM on **GPIO 18 (header pin 12)**, as a Raspberry Pi does: tones, MP3 and video
+  sound, 44.1 kHz from a DMA channel, so nothing else the board does makes it stutter. The pin
+  can't drive a speaker by itself. For headphones or an amplifier's input, use a 1 kΩ resistor
+  from pin 12, then a 10 µF capacitor in series to the plug's tip, and a 10 nF capacitor from the
+  resistor's far end to ground (pin 14) to take off the PWM hiss; the plug's sleeve goes to ground.
+  A small amplifier board (PAM8302, PAM8403, or a powered speaker) is loudest.
+- **Network and clock through the computer:** run `node tools/bridge.js` (or `npm run bridge`)
+  on the computer the board is plugged into. It sets the board's clock and time zone, and fetches
+  `http.get` / `http.post` for it - HTTPS included, as the computer does the TLS - so the weather
+  dashboard (news included), stocks and the clock work as on a WiFi board: `wifi.connect()` waits
+  for the bridge, `wifi.ntp()` asks it for the time, `board.network` is `"usb"`. It's also a REPL
+  terminal (Ctrl-] quits), and its log hides API keys in URLs. It uses the REPL's serial port, so
+  close other serial monitors first; without it, network calls fail with a message saying so.
+- **microSD** on SPI: SCK 30, MOSI 31, MISO 40, CS 43. Use a name-brand SDHC card (4-32 GB, FAT32).
+- **Flashing:** `pio run -e rp2350-pizero -t upload` (if it can't find the board, hold BOOT
+  while plugging it in; on Linux picotool also needs the Raspberry Pi udev rule:
+  `SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666"` in `/etc/udev/rules.d/99-picotool.rules`), then `pio run -e rp2350-pizero -t uploadfs` for the apps; or drag a
+  release `.uf2` onto the board's drive. `flash.js` doesn't apply (it installs ESP32 firmware).
+- **Not yet:** sound over HDMI, the BOOT button as a menu key (it's wired to the flash chip),
+  installing firmware from a file, WiFi through an add-on board, a web server over the USB bridge.
+- If it ever hangs while starting up, a watchdog restarts it after 8 seconds and skips the step that
+  hung; `board.bootProblem` then says which.
+- The background jobs (music, video) run as cooperative tasks on core 0 (`src/port_rp2.cpp`):
+  they get turns whenever the interpreter waits or checks for Ctrl+C.
+
 ## Switching firmware (`.FLH` files)
 
 `flash.js` installs firmware from the SD card into the board's spare firmware slot, keeping the
@@ -668,6 +718,14 @@ no spare slot (the classic CYD's partition table) can't install this way.
 - `lib/ESP32-S3-VGA`: bitluni's ESP32-S3-VGA, as extended by mast4rbug's ESP32-CoCo emulator.
   bitluni's repository doesn't state a licence. Each library's `NOTICE.md` lists its origin and
   the changes made here.
+- `lib/libdvi`: from Luke Wren's [PicoDVI](https://github.com/Wren6991/PicoDVI), BSD-3-Clause
+  (`lib/libdvi/LICENSE`); `dvi_serialiser.pio.h` is the generated header from Adafruit's PicoDVI
+  fork (BSD).
+- `lib/PicoPIOUSB`: sekigon-gonnoc's [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB)
+  0.7.2, MIT (`lib/PicoPIOUSB/LICENSE`).
+- The RP2350-PiZero's pin wiring was checked against Waveshare's schematic and Paul Cunningham's
+  [XRoar port for the board](https://github.com/ugufru/xroar-waveshare-rp2350-pizero) (no code from
+  it is used here).
 - Everything else here is **MIT** licensed (`LICENSE`).
 
 ## Troubleshooting

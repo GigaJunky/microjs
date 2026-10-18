@@ -2,9 +2,12 @@
 # Build web-flasher images for every board profile into release/:
 #   micro-js-<version>-<board>-full.bin   firmware + bootloader + example scripts (flash at 0x0)
 #   micro-js-<version>-<board>-app.bin    firmware + bootloader only; keeps the scripts on the board
+# RP2350 boards get .uf2 files instead (-full.uf2 / -app.uf2): drag one onto the drive the board
+# shows when plugged in with BOOT held.
 # <version> comes from src/version.h (MICROJS_VERSION).
-# The scripts image is built from a copy of data/ with a blank micro-js.json, so your own WiFi
-# password and API keys never end up in a release.
+# The scripts image is built from a copy of data/ with a blank micro-js.json (and without the high
+# scores and settings a board saves there), so your own WiFi password and API keys never end up in
+# a release.
 #
 #   tools/build_release.sh              all boards
 #   tools/build_release.sh cyd          just one
@@ -25,7 +28,9 @@ ENVS=${*:-$(grep -oP '^\[env:\K[^\]]+' platformio.ini | grep -v -- '-template$' 
 STAGE=$(mktemp -d)   # the data/ folder that becomes the filesystem image (.js + a blank config)
 BINS=$(mktemp -d)    # app binaries stashed per env (buildfs and run clean each other's output)
 trap 'rm -rf "$STAGE" "$BINS"' EXIT
-cp "$ROOT"/data/*.js "$STAGE"/
+# the apps and everything they load (pages, lib/), but none of a board's own state or settings
+cp -r "$ROOT"/data/. "$STAGE"/
+rm -f "$STAGE"/{micro-js,esp32-js,cyd-js,sound,touchcal,launcher}.json "$STAGE"/*.hi "$STAGE"/*.part
 cat > "$STAGE/micro-js.json" <<'EOF'
 {
   "wifi": { "ssid": "", "pass": "" },
@@ -45,10 +50,23 @@ for env in $ENVS; do
   # app binaries aside after the app build, then the filesystem image after buildfs.
   dir=$BINS/$env; mkdir -p "$dir"
   "$PIO" run -e "$env" -s
+  envcfg=$(sed -n "/^\[env:$env\]/,/^\[/p" platformio.ini)
+  if grep -q 'platform-raspberrypi' <<<"$envcfg"; then  # RP2350: UF2 files
+    cp .pio/build/$env/firmware.{bin,elf} "$dir"/
+    PLATFORMIO_DATA_DIR="$STAGE" "$PIO" run -e "$env" -t buildfs -s
+    cp .pio/build/$env/littlefs.bin "$dir"/
+    # the filesystem's flash address, from the firmware's own linker symbols
+    NM=$(ls "$CORE"/packages/toolchain-rp2040-earlephilhower/bin/arm-none-eabi-nm)
+    fsoff=0x$("$NM" "$dir/firmware.elf" | awk '$3 == "_FS_start" {print $1}')
+    node "$ROOT/tools/make-uf2.js" "$ROOT/release/micro-js-$VERSION-$env-app.uf2" "$dir/firmware.bin@0x10000000" >/dev/null
+    node "$ROOT/tools/make-uf2.js" "$ROOT/release/micro-js-$VERSION-$env-full.uf2" "$dir/firmware.bin@0x10000000" \
+      "$dir/littlefs.bin@$fsoff" >/dev/null
+    echo "   release/micro-js-$VERSION-$env-app.uf2, release/micro-js-$VERSION-$env-full.uf2 (scripts at $fsoff)"
+    continue
+  fi
   cp .pio/build/$env/{bootloader,partitions,firmware}.bin "$dir"/
   PLATFORMIO_DATA_DIR="$STAGE" "$PIO" run -e "$env" -t buildfs -s
   cp .pio/build/$env/littlefs.bin "$dir"/
-  envcfg=$(sed -n "/^\[env:$env\]/,/^\[/p" platformio.ini)
   # grep under `set -e` must not abort the script when it finds nothing, so test explicitly
   chip=esp32; boot=0x1000
   if grep -q 'esp32-s3' <<<"$envcfg"; then chip=esp32s3; boot=0x0; fi

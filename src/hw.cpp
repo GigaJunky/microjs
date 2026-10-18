@@ -7,7 +7,7 @@
 #include <SD.h>
 #include <TFT_eSPI.h>
 #include <algorithm>
-#include <esp_heap_caps.h>
+#include "port.h"  // chip services (ESP32 / RP2350)
 #include <sys/time.h>
 #include <time.h>
 #if JS_WIFI
@@ -18,10 +18,14 @@
 #include <DNSServer.h>
 #endif
 #include <memory>
+#if !MICROJS_RP2
 #include <Update.h>
-#include <mbedtls/base64.h>
+#endif
 #include "board.h"
-#ifdef BOARD_SD_MMC_CLK
+#if MICROJS_RP2
+#include <SDFS.h>
+#define SDCARD SDFS
+#elif defined(BOARD_SD_MMC_CLK)
 #include <SD_MMC.h>
 #define SDCARD SD_MMC
 #else
@@ -64,7 +68,11 @@ static Object* spriteProto = nullptr;
 #define CA(i) colorArg(I, JS_ARG(i))
 
 // ------------------------------------------------------------------ PWM (Arduino core 2.x and 3.x)
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
+#if MICROJS_RP2  // arduino-pico: one PWM frequency for all analogWrite pins, tone() for tones
+static void pwmAttach(int pin, int ch, int freq) { (void)ch; analogWriteFreq(freq); analogWriteRange(255); pinMode(pin, OUTPUT); }
+static void pwmWrite(int pin, int ch, int duty) { (void)ch; analogWrite(pin, duty); }
+static void pwmTone(int pin, int ch, int freq) { (void)ch; if (freq > 0) tone(pin, freq); else noTone(pin); }
+#elif ESP_ARDUINO_VERSION_MAJOR >= 3
 static void pwmAttach(int pin, int ch, int freq) { ledcAttachChannel(pin, freq, 8, ch); }
 static void pwmWrite(int pin, int ch, int duty) { (void)ch; ledcWrite(pin, duty); }
 static void pwmTone(int pin, int ch, int freq) { (void)ch; ledcWriteTone(pin, freq); }
@@ -182,7 +190,7 @@ static void speakerBegin() {
     Wire.write(r[1]);
     if (Wire.endTransmission()) fails++;
   }
-  if (fails) Serial.printf("speaker: no ES8311 codec answering at I2C 0x%02x\n", BOARD_SPEAKER_ES8311);
+  if (fails) replSerial.printf("speaker: no ES8311 codec answering at I2C 0x%02x\n", BOARD_SPEAKER_ES8311);
 #endif
 #if BOARD_SPEAKER_AMP_EN >= 0
   pinMode(BOARD_SPEAKER_AMP_EN, OUTPUT);
@@ -250,6 +258,124 @@ static void musicWrite(int16_t* pcm, int samples, int channels) {
 #endif
   size_t wrote;
   i2s_write(I2S_NUM_1, pcm, samples * 2 * sizeof(int16_t), &wrote, portMAX_DELAY);
+}
+#elif MICROJS_RP2 && BOARD_SPEAKER_PWM >= 0
+// RP2350: the speaker pin is a 10-bit PWM DAC (a 246 kHz carrier at 252 MHz, far above hearing)
+// whose level a DMA channel sets from a ring of samples at 44.1 kHz, paced by a DMA timer - no
+// interrupt or busy core can make it stutter. A task keeps the ring topped up with a tone's square
+// wave or silence; while music plays, the MP3 engine below writes into it through music*().
+// Tones stay ~45 ms ahead of what's playing (so a new one starts quickly), music ~190 ms (so it
+// rides out a slow video frame). If nothing refills it in time, the ring holds silence.
+#include <hardware/pwm.h>
+#include <hardware/dma.h>
+#include <hardware/clocks.h>
+static const uint32_t AUD_RING = 16384, AUD_TOP = 1023, AUD_MID = 512;
+static const uint32_t AUD_AHEAD_TONE = 2048, AUD_AHEAD_MUSIC = 8192;
+static uint16_t audRing[AUD_RING] __attribute__((aligned(AUD_RING * 2)));
+static uint32_t audW = 0;  // the next slot to write
+static int audDma = -1;
+static double audRate = 44100;
+static volatile int spkFreq = 0;
+static volatile bool mp3Active = false;
+static uint32_t pwmStep = 0, pwmPhase = 0;  // resampling: input samples per output sample (16.16)
+static int pwmLast = 0;
+static uint32_t audPlaying() { return ((uint32_t)dma_hw->ch[audDma].read_addr - (uint32_t)audRing) / 2 % AUD_RING; }
+// how far ahead of the DMA we've written; if it caught up with us, start again just ahead of it
+static uint32_t audAhead(uint32_t limit) {
+  uint32_t rd = audPlaying(), ahead = (audW - rd) % AUD_RING;
+  if (ahead > limit + 256) {
+    audW = (rd + 64) % AUD_RING;
+    ahead = 64;
+  }
+  return ahead;
+}
+static void audSilenceAhead() {  // what plays if nothing is written in time: silence
+  for (uint32_t i = 0, w = audW; i < AUD_RING / 4; i++, w = (w + 1) % AUD_RING) audRing[w] = AUD_MID;
+}
+static void audPut(uint16_t v) {
+  audRing[audW] = v;
+  audW = (audW + 1) % AUD_RING;
+}
+static void speakerTask(void*) {
+  uint32_t phase = 0;  // 16.16 fixed point position in the wave
+  for (;;) {
+    if (!mp3Active) {
+      int f = spkFreq, amp = spkMuted ? 0 : 400 * spkVolume / 100;
+      uint32_t step = f > 0 && amp ? (uint32_t)(((uint64_t)f << 16) / audRate) : 0;
+      for (uint32_t n = audAhead(AUD_AHEAD_TONE); n < AUD_AHEAD_TONE; n++) {
+        uint16_t v = AUD_MID;
+        if (step) {
+          v = phase & 0x8000 ? AUD_MID + amp : AUD_MID - amp;
+          phase += step;
+        }
+        audPut(v);
+      }
+      audSilenceAhead();
+    }
+    vTaskDelay(10);
+  }
+}
+static void speakerBegin() {
+  for (auto& v : audRing) v = AUD_MID;
+  gpio_set_function(BOARD_SPEAKER_PWM, GPIO_FUNC_PWM);
+  uint slice = pwm_gpio_to_slice_num(BOARD_SPEAKER_PWM);
+  pwm_config pc = pwm_get_default_config();
+  pwm_config_set_wrap(&pc, AUD_TOP);
+  pwm_init(slice, &pc, true);
+  // the sample clock: sys clock * x / y, as close to 44.1 kHz as whole numbers get (exact at 252 MHz)
+  uint32_t sys = clock_get_hz(clk_sys), bx = 1, by = 1;
+  double best = 1e9;
+  for (uint32_t x = 1; x <= 16; x++) {
+    uint32_t y = (uint32_t)((double)sys * x / 44100 + 0.5);
+    if (y > 65535) break;
+    double err = fabs((double)sys * x / y - 44100);
+    if (err < best) { best = err; bx = x; by = y; }
+  }
+  int timer = dma_claim_unused_timer(true);
+  dma_timer_set_fraction(timer, bx, by);
+  audRate = (double)sys * bx / by;
+  audDma = dma_claim_unused_channel(true);
+  dma_channel_config dc = dma_channel_get_default_config(audDma);
+  channel_config_set_transfer_data_size(&dc, DMA_SIZE_16);
+  channel_config_set_read_increment(&dc, true);
+  channel_config_set_write_increment(&dc, false);
+  channel_config_set_ring(&dc, false, 15);  // the read address wraps every 32 KB: the ring
+  channel_config_set_dreq(&dc, dma_get_timer_dreq(timer));
+  // a 16-bit write lands in both halves of the slice's level register (channel A is this pin)
+  dma_channel_configure(audDma, &dc, &pwm_hw->slice[slice].cc, audRing, dma_encode_endless_transfer_count(), true);
+  // (interrupts use whichever task's stack is current, so leave them room: 4 KB, not 2)
+  xTaskCreatePinnedToCore(speakerTask, "speaker", 4096, nullptr, 3, nullptr, 0);
+}
+static void musicBegin() {
+  pwmPhase = 0;
+  pwmLast = 0;
+  pwmStep = (uint32_t)(44100 / audRate * 65536);
+}
+static void musicRate(uint32_t rate) { pwmStep = (uint32_t)(rate / audRate * 65536); }
+static void musicSilence() {
+  audW = (audPlaying() + 64) % AUD_RING;
+  audSilenceAhead();
+}
+static void musicEnd() { musicSilence(); }
+extern volatile bool mp3Stop;
+static void musicWrite(int16_t* pcm, int samples, int channels) {
+  int v = spkMuted ? 0 : spkVolume;
+  for (int i = 0; i < samples; i++) {
+    int cur = channels == 2 ? (pcm[2 * i] + pcm[2 * i + 1]) / 2 : pcm[i];
+    while (pwmPhase < 65536) {  // output samples between the previous input sample and this one
+      int s = pwmLast + (int)((int64_t)(cur - pwmLast) * pwmPhase >> 16);
+      int u = AUD_MID + s * v / 6400;  // 16-bit signed -> 10-bit centred, with the volume
+      while (audAhead(AUD_AHEAD_MUSIC) >= AUD_AHEAD_MUSIC) {  // far enough ahead: let others run
+        if (mp3Stop) return;
+        vTaskDelay(5);
+      }
+      audPut(u < 0 ? 0 : u > (int)AUD_TOP ? AUD_TOP : u);
+      pwmPhase += pwmStep;
+    }
+    pwmPhase -= 65536;
+    pwmLast = cur;
+  }
+  audSilenceAhead();
 }
 #elif BOARD_SPEAKER_PWM >= 0
 // A PWM speaker pin as an 8-bit DAC (as the ESP32-CoCo emulator does): the PWM runs at 156.25 kHz,
@@ -434,7 +560,7 @@ static void mp3Run(void*) {
 static void mp3StopWait() {
   if (!mp3Task) return;
   mp3Stop = true;
-  for (int i = 0; i < 200 && mp3Task; i++) delay(5);
+  for (int i = 0; i < 200 && mp3Task; i++) vTaskDelay(5);
 }
 // Start playing an MP3 file, or (aviEnd set) the MP3 sound inside an AVI. "" or why not.
 static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint32_t aviEnd = 0) {
@@ -459,7 +585,9 @@ static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint
 
 static void toneWrite(int freq) {
   if (spkMuted || spkVolume <= 0) freq = 0;
-#if BOARD_SPEAKER_PWM >= 0
+#if MICROJS_RP2 && BOARD_SPEAKER_PWM >= 0
+  spkFreq = freq;  // the speaker task plays it
+#elif BOARD_SPEAKER_PWM >= 0
   if (mp3Active) return;  // the pin is playing music
   pwmTone(BOARD_SPEAKER_PWM, CH_SPK, freq);
 #elif BOARD_SPEAKER_I2S_DOUT >= 0
@@ -1390,9 +1518,12 @@ JS_NATIVE(lcd_drawImage) {  // -> { width, height, zoom, x, y, w, h } (w, h: the
 JS_NATIVE(lcd_createSprite) {
   (void)self;
   int w = IA(0), h = IA(1), depth = argc > 2 ? IA(2) : 16;
-  if (w <= 0 || h <= 0 || w > 320 || h > 320) I.throwError("RangeError", "createSprite: bad size");
+  if (w <= 0 || h <= 0 || w > 512 || h > 512) I.throwError("RangeError", "createSprite: bad size");
   if (depth != 1 && depth != 4 && depth != 8 && depth != 16) I.throwError("RangeError", "createSprite: depth must be 1, 4, 8 or 16");
   TFT_eSprite* sp = new TFT_eSprite(&tft);
+  // TFT_eSPI never initialises its free-font pointer: a sprite got whatever the heap held there
+  // (zero on the ESP32 by luck, not on the RP2350), and text in font 1 followed it and hung.
+  sp->setTextFont(1);
   sp->setColorDepth(depth);
   if (!sp->createSprite(w, h)) {
     I.collect();  // unreachable sprites may be holding the memory
@@ -1460,7 +1591,7 @@ JS_NATIVE(g_analogRead) { (void)self; return Value::num(analogRead(IA(0))); }
 JS_NATIVE(g_micros) { (void)I; (void)self; (void)args; (void)argc; return Value::num((double)micros()); }
 JS_NATIVE(g_delay) {
   (void)self;
-  uint32_t end = millis() + (uint32_t)std::max(0, IA(0));
+  uint32_t end = millis() + (uint32_t)std::max<int32_t>(0, IA(0));
   while ((int32_t)(end - millis()) > 0) {
     if (I.poll) I.poll();  // lets Ctrl-C interrupt
     hwService();
@@ -1711,7 +1842,7 @@ static void videoStopWait() {
   if (!vidTask) return;
   vidStop = true;
   vidPaused = false;
-  for (int i = 0; i < 400 && vidTask; i++) delay(5);
+  for (int i = 0; i < 400 && vidTask; i++) vTaskDelay(5);
 }
 JS_NATIVE(video_play) {  // video.play(path) -> "" when it starts, else why not
   (void)self;
@@ -1748,7 +1879,7 @@ JS_NATIVE(video_pause) {
   (void)self;
   vidPaused = argc ? I.truthy(args[0]) : !vidPaused;
   if (vidPaused)
-    for (int i = 0; i < 300 && vidTask && !vidHolding; i++) delay(5);  // up to 1.5 s for a slow frame
+    for (int i = 0; i < 300 && vidTask && !vidHolding; i++) vTaskDelay(5);  // up to 1.5 s for a slow frame
   return Value::boolean(vidPaused);
 }
 JS_NATIVE(video_status) {  // { playing, paused, frame, frames, shown, dropped, fps, width, height, seconds, duration, sound, error }
@@ -1896,6 +2027,7 @@ static fs::FS* pickFs(const std::string& path, std::string& rel) {
   return fsOk ? (fs::FS*)&LittleFS : nullptr;
 }
 
+#if !MICROJS_RP2
 // ---- firmware files, installed into the spare OTA slot by flash.js. Three kinds:
 //   .FLH  the ESP32-CoCo emulator's format, so the two can install each other:
 //         "<checksum>-COCO ESP32 CUSTOM FIRMWARE/<release notes>~<app image>", checksum = the sum
@@ -2020,6 +2152,23 @@ JS_NATIVE(sys_installFirmware) {  // sys.installFirmware(path): checks, writes t
   ESP.restart();
   return Value();
 }
+#else
+// Installing other firmware from a file is ESP32-only for now (an RP2350 takes a .uf2 file by
+// holding BOOT while plugging it in, or picotool).
+JS_NATIVE(sys_firmwareInfo) {
+  (void)self; (void)args; (void)argc;
+  Object* o = I.newObject();
+  I.setOwn(o, "ok", Value::boolean(false));
+  I.setOwn(o, "error", I.str("installing firmware from a file isn't supported on this board"));
+  I.setOwn(o, "notes", I.str(""));
+  I.setOwn(o, "size", Value::num(0));
+  return Value::obj(o);
+}
+JS_NATIVE(sys_installFirmware) {
+  (void)self; (void)args; (void)argc;
+  return I.str("installing firmware from a file isn't supported on this board");
+}
+#endif
 bool hwReadFile(const std::string& path, std::string& out) {
   std::string rel;
   fs::FS* f = pickFs(path, rel);
@@ -2066,7 +2215,7 @@ bool hwWriteFile(const std::string& path, const std::string& data, bool append) 
   std::string rel;
   fs::FS* f = pickFs(path, rel);
   if (!f) return false;
-  File file = f->open(rel.c_str(), append ? FILE_APPEND : FILE_WRITE);
+  File file = f->open(rel.c_str(), append ? "a" : "w");
   if (!file) return false;
   size_t n = file.write((const uint8_t*)data.data(), data.size());
   file.close();
@@ -2084,7 +2233,7 @@ std::vector<FileEntry> hwList(const std::string& dir) {
   std::string rel;
   fs::FS* f = pickFs(dir.empty() ? "/" : dir, rel);
   if (!f) return r;
-  File root = f->open(rel.c_str());
+  File root = f->open(rel.c_str(), "r");
   if (!root || !root.isDirectory()) return r;
   for (File e = root.openNextFile(); e; e = root.openNextFile()) {
     std::string name = e.name();
@@ -2127,14 +2276,49 @@ static Value entryObj(Interp& I, const std::string& name, size_t size, bool dir)
 // Binary-safe file transfer for tools (tools/web-ide.html): the serial console carries text, so
 // bytes travel as base64.
 //   fs.writeBase64(path, b64, [append]) -> true;  fs.readBase64(path, offset, length) -> b64 ("" at the end)
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static bool b64Decode(const std::string& in, std::string& out) {
+  out.clear();
+  uint32_t acc = 0;
+  int bits = 0, pad = 0;
+  for (char c : in) {
+    int v;
+    if (c >= 'A' && c <= 'Z') v = c - 'A';
+    else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+    else if (c >= '0' && c <= '9') v = c - '0' + 52;
+    else if (c == '+') v = 62;
+    else if (c == '/') v = 63;
+    else if (c == '=') { pad++; continue; }
+    else return false;
+    if (pad) return false;  // data after the padding
+    acc = acc << 6 | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += (char)(acc >> bits & 0xFF);
+    }
+  }
+  return pad <= 2 && (in.size() % 4 == 0);
+}
+static std::string b64Encode(const uint8_t* p, size_t n) {
+  std::string out;
+  out.reserve((n + 2) / 3 * 4);
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = p[i] << 16 | (i + 1 < n ? p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+    out += B64[v >> 18 & 63];
+    out += B64[v >> 12 & 63];
+    out += i + 1 < n ? B64[v >> 6 & 63] : '=';
+    out += i + 2 < n ? B64[v & 63] : '=';
+  }
+  return out;
+}
 JS_NATIVE(fs_writeBase64) {
   (void)self;
   std::string path = I.toStr(JS_ARG(0)), b64 = I.toStr(JS_ARG(1)), rel;
   bool append = argc > 2 && I.truthy(args[2]);
-  size_t n = 0;
-  std::string bytes(b64.size() * 3 / 4 + 4, '\0');
-  if (mbedtls_base64_decode((unsigned char*)&bytes[0], bytes.size(), &n, (const unsigned char*)b64.data(), b64.size()) != 0)
-    I.throwError("Error", "fs.writeBase64: that isn't base64");
+  std::string bytes;
+  if (!b64Decode(b64, bytes)) I.throwError("Error", "fs.writeBase64: that isn't base64");
+  size_t n = bytes.size();
   fs::FS* f = pickFs(path, rel);
   File file = f ? f->open(rel.c_str(), append ? "a" : "w") : File();
   if (!file) return Value::boolean(false);
@@ -2154,11 +2338,7 @@ JS_NATIVE(fs_readBase64) {
   int got = file.seek(off) ? file.read((uint8_t*)&bytes[0], len) : 0;
   file.close();
   if (got <= 0) return I.str("");
-  std::string out(((size_t)got + 2) / 3 * 4 + 1, '\0');
-  size_t n = 0;
-  mbedtls_base64_encode((unsigned char*)&out[0], out.size(), &n, (const unsigned char*)bytes.data(), got);
-  out.resize(n);
-  return I.str(out);
+  return I.str(b64Encode((const uint8_t*)bytes.data(), got));
 }
 JS_NATIVE(fs_contains) {  // fs.contains(path, text): searched in pieces, never loaded whole
   (void)self;
@@ -2175,7 +2355,7 @@ JS_NATIVE(fs_stat) {  // fs.stat(path) -> { name, size, dir } or null
   std::string path = I.toStr(JS_ARG(0)), rel;
   fs::FS* f = pickFs(path, rel);
   if (!f || !f->exists(rel.c_str())) return Value::null();
-  File e = f->open(rel.c_str());
+  File e = f->open(rel.c_str(), "r");
   if (!e) return Value::null();
   Value v = entryObj(I, path.substr(path.rfind('/') + 1), e.size(), e.isDirectory());
   e.close();
@@ -2214,8 +2394,14 @@ JS_NATIVE(fs_space) {  // fs.space("/" or "/sd") -> { total, used } in bytes
   std::string path = argc ? I.toStr(args[0]) : "/", rel;
   bool sd = pickFs(path, rel) == (fs::FS*)&SDCARD;
   Object* o = I.newObject();
+#if MICROJS_RP2
+  FSInfo info{};
+  bool got = sd ? sdOk && SDCARD.info(info) : fsOk && LittleFS.info(info);
+  double total = got ? (double)info.totalBytes : 0, used = got ? (double)info.usedBytes : 0;
+#else
   double total = sd ? (sdOk ? (double)SDCARD.totalBytes() : 0) : (fsOk ? (double)LittleFS.totalBytes() : 0);
   double used = sd ? (sdOk ? (double)SDCARD.usedBytes() : 0) : (fsOk ? (double)LittleFS.usedBytes() : 0);
+#endif
   I.setOwn(o, "total", Value::num(total));
   I.setOwn(o, "used", Value::num(used));
   return Value::obj(o);
@@ -2520,10 +2706,38 @@ JS_NATIVE(http_post) {
 #endif
 
 // ------------------------------------------------------------------ setup
+#if MICROJS_RP2
+// ---- start-up safety net (RP2350). There's no panic log there, so a step that hangs at power-on
+// (a driver panic, say) would leave a silent board that needs BOOTSEL to recover. Instead a
+// watchdog resets it; the step that was running is kept in a watchdog scratch register (it
+// survives that reset), and the next start skips it and reports it in board.bootProblem.
+#include <hardware/watchdog.h>
+static const uint32_t BOOT_MAGIC = 0x6D6A7300;  // "mjs" + step number
+static const char* const BOOT_STEPS[] = {"", "screen", "LED and sound", "flash filesystem", "SD card",
+                                         "settings", "USB host", "start-up"};
+static int bootSkip = 0;  // the step that hung last time
+static void bootStep(int n) {
+  watchdog_hw->scratch[5] = n ? BOOT_MAGIC | n : 0;
+  watchdog_update();
+}
+#define BOOT_STEP(n) bootStep(n); if (bootSkip != (n))
+#else
+#define BOOT_STEP(n)
+#endif
+
 void hwBegin() {
-  tft.init();
-  tft.setRotation(rotation);
-  tft.fillScreen(TFT_BLACK);
+#if MICROJS_RP2
+  uint32_t last = watchdog_hw->scratch[5];
+  if (watchdog_enable_caused_reboot() && (last & 0xFFFFFF00u) == BOOT_MAGIC && (last & 0xFF) < 7)
+    bootSkip = last & 0xFF;
+  watchdog_enable(8000, true);  // fed by hwService / hwYield; paused while a debugger halts
+#endif
+  BOOT_STEP(1) {
+    tft.init();
+    tft.setRotation(rotation);
+    tft.fillScreen(TFT_BLACK);
+  }
+  BOOT_STEP(2) {
 
 #if defined(BOARD_LED_BICOLOR_A)
   pwmAttach(BOARD_LED_BICOLOR_A, CH_R, 5000);
@@ -2538,7 +2752,9 @@ void hwBegin() {
   pwmAttach(BOARD_BACKLIGHT, CH_BL, 5000);
 #endif
   backlightWrite(255);
-#if BOARD_SPEAKER_PWM >= 0
+#if MICROJS_RP2 && BOARD_SPEAKER_PWM >= 0
+  speakerBegin();
+#elif BOARD_SPEAKER_PWM >= 0
   pwmAttach(BOARD_SPEAKER_PWM, CH_SPK, 1000);
 #endif
   toneWrite(0);
@@ -2546,12 +2762,26 @@ void hwBegin() {
 #if BOARD_LIGHT_SENSOR >= 0
   analogSetPinAttenuation(BOARD_LIGHT_SENSOR, ADC_0db);
 #endif
+  }
 
+  BOOT_STEP(3) {
+#if MICROJS_RP2
+  fsOk = LittleFS.begin();  // (formats an empty flash by itself)
+#else
   fsOk = LittleFS.begin(true);
+#endif
   loadTouchCal();
+  }
+  BOOT_STEP(4) {
 #if defined(BOARD_SD_MMC_CLK)
   SD_MMC.setPins(BOARD_SD_MMC_CLK, BOARD_SD_MMC_CMD, BOARD_SD_MMC_D0);
   sdOk = SD_MMC.begin("/sdcard", true);  // 1-bit mode
+#elif MICROJS_RP2 && BOARD_SD_CS >= 0
+  SPI1.setRX(BOARD_SD_MISO);
+  SPI1.setTX(BOARD_SD_MOSI);
+  SPI1.setSCK(BOARD_SD_SCK);
+  SDFS.setConfig(SDFSConfig(BOARD_SD_CS, SPI_HALF_SPEED, SPI1));
+  sdOk = SDFS.begin();
 #elif BOARD_SD_CS >= 0
 #if BOARD_SD_PARK_CS >= 0
   pinMode(BOARD_SD_PARK_CS, OUTPUT);           // deselect the other device sharing this SPI bus
@@ -2562,16 +2792,24 @@ void hwBegin() {
   sdSpi.begin(BOARD_SD_SCK, BOARD_SD_MISO, BOARD_SD_MOSI, BOARD_SD_CS);
   sdOk = SD.begin(BOARD_SD_CS, sdSpi);
 #endif
+  }
+  BOOT_STEP(5) {
   setTimeZoneFromConfig();
   ledPinsFromConfig();
   speakerEnableFromConfig();
-  keyboardBegin();  // after the filesystems: a USB keyboard driver's timer must not run during a format
+  }
+  BOOT_STEP(6) keyboardBegin();  // after the filesystems: a USB keyboard driver's timer must not run during a format
 #if BOARD_SPEAKER_I2S_DOUT >= 0
   speakerBegin();  // after the keyboard and touch: an ES8311 codec shares their I2C bus
 #endif
+  BOOT_STEP(7) {}  // until the interpreter is up (hwSplash)
 }
 
 void hwSplash() {
+#if MICROJS_RP2
+  bootStep(0);  // started fine
+  if (bootSkip) replSerial.printf("\r\nThe last start hung at: %s - skipped it this time\r\n", BOOT_STEPS[bootSkip]);
+#endif
   int w = tft.width(), h = tft.height();
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
@@ -2588,9 +2826,27 @@ void hwSplash() {
   tft.setTextDatum(TL_DATUM);
 }
 
+#if MICROJS_RP2
+#if BOARD_KEYBOARD == KEYBOARD_EXTERNAL
+void hwExternalKeyboardPoll();
+#endif
+extern "C" void TinyUSB_Device_Task(void);
+// whenever a task waits (port.h): keep the USB host going
+void hwYield() {
+  watchdog_update();
+  TinyUSB_Device_Task();  // USB serial work the interrupt skipped (port.h, ReplSerial)
+#if BOARD_KEYBOARD == KEYBOARD_EXTERNAL
+  hwExternalKeyboardPoll();
+#endif
+}
+#endif
+
 void hwService() {
 #ifdef BOARD_SCREEN_HEADER
   tft.service();
+#endif
+#if MICROJS_RP2
+  hwYield();
 #endif
   if (toneEnd && (int32_t)(millis() - toneEnd) >= 0) {
     toneWrite(0);
@@ -2984,6 +3240,133 @@ static const NativeEntry LAZY_wifi[] = {{"connect", wifi_connect}, {"status", wi
 static const NativeEntry LAZY_http[] = {{"get", http_get}, {"post", http_post}, {nullptr, nullptr}};
 #endif
 
+#if MICROJS_BRIDGE
+// ---- network and clock through the computer, on boards without WiFi (the RP2350-PiZero).
+// `node tools/bridge.js` on the computer the board is plugged into fetches the web pages and keeps
+// the clock set, over the same USB serial port as the REPL. Its messages are lines starting with STX
+// (0x02), which main.cpp hands to hwBridgeLine() instead of the REPL. Fields are separated by
+// spaces; anything that may contain spaces travels as base64.
+//   computer -> board:  STX "MJS ping"                          the bridge is running (every 3 s)
+//                       STX "MJS time <unix ms> <UTC offset, minutes>"   set the clock
+//                       STX "MJS res <id> <status> <body>"     a request's answer (status 0: body = error)
+//   board -> computer:  STX "MJS req <id> <method> <url> <headers as JSON> <body>"
+//                       STX "MJS gettime"
+// So wifi.connect() waits for the bridge, wifi.ntp() asks it for the time, and http.get/post go
+// through it - apps written for WiFi work unchanged (HTTPS included: the computer does the TLS).
+static uint32_t bridgeSeen = 0;    // millis() of the last ping or answer
+static uint32_t bridgeTimes = 0;   // how many times the clock has been set
+static uint32_t bridgeWant = 0;    // the request waiting for its answer
+static bool bridgeGot = false;
+static int bridgeStatus = 0;
+static std::string bridgeBody;
+static uint32_t bridgeNextId = 1;
+static bool bridgeAlive() { return bridgeSeen && millis() - bridgeSeen < 10000; }
+
+void hwBridgeLine(const std::string& line) {
+  std::vector<std::string> f;
+  for (size_t i = 0; i < line.size();) {
+    size_t j = line.find(' ', i);
+    if (j == std::string::npos) j = line.size();
+    if (j > i) f.push_back(line.substr(i, j - i));
+    i = j + 1;
+  }
+  if (f.size() < 2 || f[0] != "MJS") return;
+  if (f[1] == "ping") {
+    bridgeSeen = millis();
+  } else if (f[1] == "time" && f.size() >= 3) {
+    uint64_t ms = strtoull(f[2].c_str(), nullptr, 10);
+    struct timeval tv = {(time_t)(ms / 1000), (suseconds_t)(ms % 1000 * 1000)};
+    settimeofday(&tv, nullptr);
+    if (f.size() >= 4 && localTz == "UTC0") {  // no utcOffsetHours in micro-js.json: the computer's zone
+      int mins = -atoi(f[3].c_str());            // POSIX sign is reversed
+      char tz[24];
+      snprintf(tz, sizeof tz, "UTC%s%d:%02d", mins < 0 ? "-" : "", abs(mins) / 60, abs(mins) % 60);
+      setenv("TZ", tz, 1);
+      tzset();
+    }
+    bridgeTimes++;
+  } else if (f[1] == "res" && f.size() >= 4) {
+    if ((uint32_t)strtoul(f[2].c_str(), nullptr, 10) != bridgeWant) return;
+    bridgeSeen = millis();
+    bridgeStatus = atoi(f[3].c_str());
+    bridgeBody.clear();
+    if (f.size() >= 5) b64Decode(f[4], bridgeBody);
+    bridgeGot = true;
+  }
+}
+
+// wait (keeping the board running: REPL input, Ctrl-C, sound) until done() or the time is up
+template <class F> static bool bridgeWait(Interp& I, uint32_t ms, F done) {
+  uint32_t t0 = millis();
+  while (!done()) {
+    if (millis() - t0 >= ms) return false;
+    if (I.poll) I.poll();
+    else hwService();
+  }
+  return true;
+}
+
+static Value bridgeRequest(Interp& I, const char* method, const std::string& url, const std::string* body, Value headers) {
+  if (!bridgeAlive())
+    I.throwError("Error", "http: no network - run  node tools/bridge.js  on the computer this board is plugged into");
+  std::string hdr = "{}";
+  if (headers.isObj()) hdr = I.toStr(I.call(I.get(I.getGlobal("JSON"), "stringify"), Value(), &headers, 1));
+  uint32_t id = bridgeNextId++;
+  bridgeWant = id;
+  bridgeGot = false;
+  std::string msg = "\x02MJS req " + std::to_string(id) + " " + method + " " +
+                    b64Encode((const uint8_t*)url.data(), url.size()) + " " +
+                    b64Encode((const uint8_t*)hdr.data(), hdr.size()) + " " +
+                    (body && !body->empty() ? b64Encode((const uint8_t*)body->data(), body->size()) : std::string("-")) + "\n";
+  replSerial.write((const uint8_t*)msg.data(), msg.size());
+  bool ok = bridgeWait(I, 30000, [] { return bridgeGot; });
+  bridgeWant = 0;
+  if (!ok) I.throwError("Error", "http: the computer didn't answer (is tools/bridge.js still running?)");
+  std::string b;
+  b.swap(bridgeBody);
+  if (bridgeStatus == 0) I.throwError("Error", "http: " + b);
+  Object* o = I.newObject();
+  I.setOwn(o, "status", Value::num(bridgeStatus));
+  I.setOwn(o, "body", I.str(b));
+  return Value::obj(o);
+}
+
+JS_NATIVE(bwifi_connect) {  // wifi.connect([ssid, pass, timeoutMs]): wait for the bridge
+  (void)self;
+  uint32_t timeout = argc > 2 ? (uint32_t)I.toNum(args[2]) : 8000;
+  return Value::boolean(bridgeWait(I, timeout, [] { return bridgeAlive(); }));
+}
+JS_NATIVE(bwifi_status) { (void)self; (void)args; (void)argc; return I.str(bridgeAlive() ? "connected" : "disconnected"); }
+JS_NATIVE(bwifi_ip) { (void)self; (void)args; (void)argc; return I.str(bridgeAlive() ? "usb" : ""); }
+JS_NATIVE(bwifi_rssi) { (void)I; (void)self; (void)args; (void)argc; return Value::num(0); }
+JS_NATIVE(bwifi_none) { (void)I; (void)self; (void)args; (void)argc; return Value(); }
+JS_NATIVE(bwifi_false) { (void)I; (void)self; (void)args; (void)argc; return Value::boolean(false); }
+JS_NATIVE(bwifi_scan) { (void)self; (void)args; (void)argc; return Value::obj(I.newArray()); }
+JS_NATIVE(bwifi_ntp) {  // wifi.ntp(): ask the computer for the time
+  (void)self; (void)args; (void)argc;
+  if (!bridgeAlive()) return Value::boolean(clockValid());
+  uint32_t before = bridgeTimes;
+  replSerial.write((const uint8_t*)"\x02MJS gettime\n", 13);
+  bridgeWait(I, 3000, [before] { return bridgeTimes != before; });
+  return Value::boolean(clockValid());
+}
+JS_NATIVE(bhttp_get) { (void)self; return bridgeRequest(I, "GET", I.toStr(JS_ARG(0)), nullptr, JS_ARG(1)); }
+JS_NATIVE(bhttp_post) {
+  (void)self;
+  Value b = JS_ARG(1);
+  std::string body = b.isObj() ? I.toStr(I.call(I.get(I.getGlobal("JSON"), "stringify"), Value(), &b, 1)) : I.toStr(b);
+  Value headers = JS_ARG(2);
+  if (headers.isUndef() && b.isObj()) {
+    Object* h = I.newObject();
+    I.setOwn(h, "Content-Type", I.str("application/json"));
+    headers = Value::obj(h);
+  }
+  return bridgeRequest(I, "POST", I.toStr(JS_ARG(0)), &body, headers);
+}
+static const NativeEntry LAZY_bwifi[] = {{"connect", bwifi_connect}, {"status", bwifi_status}, {"ip", bwifi_ip}, {"rssi", bwifi_rssi}, {"disconnect", bwifi_none}, {"ap", bwifi_false}, {"scan", bwifi_scan}, {"ntp", bwifi_ntp}, {nullptr, nullptr}};
+static const NativeEntry LAZY_bhttp[] = {{"get", bhttp_get}, {"post", bhttp_post}, {nullptr, nullptr}};
+#endif
+
 void hwInstall(Interp& I) {
   // drawing methods shared by the screen and sprites
   Object* G = I.newObject();
@@ -3079,10 +3462,23 @@ void hwInstall(Interp& I) {
   I.setOwn(board, "lowMemory", Value::boolean(hwLowMemory()));  // too small for @needs-more-memory apps
   I.setOwn(board, "hasBattery", Value::boolean(BOARD_BATTERY_ADC >= 0));
   I.setOwn(board, "hasMusic", Value::boolean(HAS_MUSIC));
+  I.setOwn(board, "hasWifi", Value::boolean(JS_WIFI));
+  // how the board reaches the network: "wifi", "usb" (through the computer: tools/bridge.js) or ""
+  I.setOwn(board, "network", I.str(JS_WIFI ? "wifi" : MICROJS_BRIDGE ? "usb" : ""));  // no: the wifi, http and web objects don't exist
+#if MICROJS_RP2
+  I.setOwn(board, "chip", I.str("rp2350"));
+#elif CONFIG_IDF_TARGET_ESP32S3
+  I.setOwn(board, "chip", I.str("esp32s3"));
+#else
+  I.setOwn(board, "chip", I.str("esp32"));
+#endif
   I.setOwn(board, "hasSpeaker", Value::boolean(BOARD_SPEAKER_PWM >= 0 || BOARD_SPEAKER_I2S_DOUT >= 0));
   I.setOwn(board, "hasLight", Value::boolean(BOARD_LIGHT_SENSOR >= 0));
   I.setOwn(board, "hasSd", Value::boolean(sdOk));
   I.setOwn(board, "psram", Value::num(ESP.getPsramSize()));
+#if MICROJS_RP2
+  if (bootSkip) I.setOwn(board, "bootProblem", I.str(std::string("hung at start-up: ") + BOOT_STEPS[bootSkip] + " (skipped)"));
+#endif
   I.setGlobal("board", Value::obj(board));
 
   Object* sys = I.newObject();
@@ -3094,6 +3490,14 @@ void hwInstall(Interp& I) {
   fsObj->lazy = LAZY_fsObj;
   I.setGlobal("fs", Value::obj(fsObj));
 
+#if MICROJS_BRIDGE  // network through the computer (tools/bridge.js)
+  Object* bwifi = I.newObject();
+  bwifi->lazy = LAZY_bwifi;
+  I.setGlobal("wifi", Value::obj(bwifi));
+  Object* bhttp = I.newObject();
+  bhttp->lazy = LAZY_bhttp;
+  I.setGlobal("http", Value::obj(bhttp));
+#endif
 #if JS_WIFI
   Object* wifi = I.newObject();
   wifi->lazy = LAZY_wifi;

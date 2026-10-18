@@ -27,3 +27,4 @@ release/*.zip
 
 # Node tools (npm install)
 node_modules/
+release/*.uf2

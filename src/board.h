@@ -6,6 +6,12 @@
 // for its pins and parts, build it, and check display, touch, LED, SD and sound on the device.
 #pragma once
 
+// MICROJS_BOARD_NAME wins over a BOARD_NAME the core defines itself (arduino-pico sets it to the
+// board's id, e.g. "waveshare_rp2350_pizero").
+#ifdef MICROJS_BOARD_NAME
+#undef BOARD_NAME
+#define BOARD_NAME MICROJS_BOARD_NAME
+#endif
 #ifndef BOARD_NAME
 #define BOARD_NAME "CYD (ESP32-2432S028R)"
 #endif
@@ -167,6 +173,11 @@
 // TFT_eSPI-compatible screen class: -DBOARD_SCREEN_HEADER='"vga_screen.h"' -DBOARD_SCREEN_CLASS=VgaScreen
 // The class must provide service() (called often from the main loop) and, as a TFT_eSprite, gets
 // sprites pushed onto it with pushToSprite().
+
+// ---- network through the computer over USB (tools/bridge.js), for boards without WiFi
+#ifndef MICROJS_BRIDGE
+#define MICROJS_BRIDGE (!JS_WIFI)
+#endif
 
 // ---- memory. Boards with PSRAM get big regions there; without it, everything is tuned to
 // fit next to the WiFi driver in ~300 KB of internal RAM (see README "Memory").

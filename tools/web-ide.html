@@ -180,6 +180,13 @@ function onText(text) {
   if (rx && !rx.includes('"@" + "@') && !rx.startsWith("@@")) partialTimer = setTimeout(() => { if (rx) { log(rx); rx = ""; } }, 300);
 }
 function handleLine(line) {
+  const stx = line.indexOf("\x02");  // a network/clock request from the board (see bridgeMessage)
+  if (stx >= 0) {
+    const before = line.slice(0, stx);
+    if (before.trim() && !/^\s*>\s*$/.test(before)) log(before);
+    bridgeMessage(line.slice(stx + 1));
+    return;
+  }
   const m = line.match(/@@(\d+):(.*):@@/);
   if (m) {
     const p = pending.get(+m[1]);
@@ -196,6 +203,51 @@ function handleLine(line) {
   if (line.includes('"@" + "@')) return;  // the board echoing one of our requests
   if (/^\s*>\s*$/.test(line)) return;      // bare prompts
   log(line, /error|Uncaught|failed/i.test(line) ? "err" : "");
+}
+
+// ---------------------------------------------------------------- network and clock for the board
+// A board without WiFi (the RP2350-PiZero: board.network "usb") reaches the web through the computer,
+// with lines that start with STX (0x02) - the same as tools/bridge.js does from a terminal. While the
+// IDE is connected to such a board it sets the board's clock and answers its http.get / http.post
+// with the browser's fetch (fine for sites that allow browser requests, as most web APIs do).
+let bridgeTimers = [];
+const b64bytes = (u8) => {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const unb64 = (s) => (s === "-" ? "" : new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0))));
+const safeUrl = (u) => u.replace(/([?&][^=&]*(?:key|token|secret|password|pass)[^=&]*=)[^&]*/gi, "$1***");
+const bridgeSend = (line) => send("\x02" + line + "\n").catch(() => {});
+const bridgeTime = () => bridgeSend(`MJS time ${Date.now()} ${-new Date().getTimezoneOffset()}`);
+function bridgeStart() {
+  bridgeStop();
+  bridgeTime();
+  bridgeSend("MJS ping");
+  bridgeTimers = [setInterval(() => bridgeSend("MJS ping"), 3000), setInterval(bridgeTime, 600000)];
+  log("giving the board the clock and the network while the IDE is connected", "sys");
+}
+function bridgeStop() { bridgeTimers.forEach(clearInterval); bridgeTimers = []; }
+async function bridgeMessage(msg) {
+  const f = msg.split(" ");
+  if (f[0] !== "MJS" || !bridgeTimers.length) return;
+  if (f[1] === "gettime") return bridgeTime();
+  if (f[1] !== "req" || f.length < 7) return;
+  const id = f[2], method = f[3];
+  let url = unb64(f[4]), headers = {};
+  try { headers = JSON.parse(unb64(f[5]) || "{}"); } catch (e) { /* none */ }
+  // a page loaded over https may not fetch plain http: try the https address then (most APIs have one)
+  if (location.protocol === "https:" && url.startsWith("http:")) url = "https:" + url.slice(5);
+  try {
+    const res = await fetch(url, { method, headers, body: method === "GET" ? undefined : unb64(f[6]) });
+    let data = new Uint8Array(await res.arrayBuffer());
+    if (data.length > 400 * 1024) data = data.subarray(0, 400 * 1024);
+    bridgeSend(`MJS res ${id} ${res.status} ${data.length ? b64bytes(data) : "-"}`);
+    log(`[network] ${method} ${safeUrl(url)} -> ${res.status} (${(data.length / 1024).toFixed(1)} KB)`, "sys");
+  } catch (e) {
+    bridgeSend(`MJS res ${id} 0 ${btoa("the browser couldn't fetch it - that site may not allow browser requests; run  npm run bridge  instead of the IDE")}`);
+    log(`[network] ${method} ${safeUrl(url)} -> failed in the browser (${e.message}); for this site, close the IDE and run  npm run bridge`, "err");
+  }
 }
 
 // ---------------------------------------------------------------- serial
@@ -233,6 +285,7 @@ async function openPort() {
   log("connected", "sys");
   await send("\r\n");
   await refreshInfo();
+  if (board && board.network === "usb") bridgeStart();
   await listDir("/");
 }
 async function readLoop() {
@@ -256,6 +309,7 @@ async function readLoop() {
 }
 async function disconnect() {
   connected = false;
+  bridgeStop();
   for (const [id, p] of pending) { clearTimeout(p.timer); p.reject(new Error("disconnected")); }
   pending.clear();
   try { if (reader) await reader.cancel(); } catch (e) {}
@@ -279,7 +333,7 @@ function setConnected(on) {
 // ---------------------------------------------------------------- board info and files
 async function refreshInfo() {
   try {
-    board = await call(`({ id: board.id || "", name: board.name, version: sys.version || "?", heap: sys.heap().free, sd: !!board.hasSd, flash: fs.space ? fs.space("/") : null, card: fs.space && board.hasSd ? fs.space("/sd") : null })`);
+    board = await call(`({ id: board.id || "", name: board.name, network: board.network || "", version: sys.version || "?", heap: sys.heap().free, sd: !!board.hasSd, flash: fs.space ? fs.space("/") : null, card: fs.space && board.hasSd ? fs.space("/sd") : null })`);
     showNick();
     const kb = (n) => (n / 1024).toFixed(0) + " KB";
     let t = `${board.name} - micro-js ${board.version} - ${kb(board.heap)} RAM free`;

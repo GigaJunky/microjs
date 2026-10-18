@@ -12,9 +12,34 @@ const ROWS = Math.floor((H - TOP - (SMALL ? 12 : 18)) / LH), TY = Math.floor((LH
 const BG = lcd.BLACK, PANEL = lcd.color(20, 24, 48), SEL = lcd.color(30, 70, 120), ACCENT = lcd.color(255, 140, 40);
 keyboard.capture(true);
 
-// ---- find the videos
+let sel = 0, top = 0, playing = false, note = "", volume = audio.volume();
+const fit = (s, px) => { const n = Math.floor(px / (F === 1 ? 6 : 8)); return s.length > n ? s.slice(0, n - 1) + "~" : s; };
+const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1, p.length - 4);
+const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+// ---- find the videos (a big SD card can take a while: say what is happening, so it doesn't look stuck)
 const videos = [];
+const SY = TOP + 8 + (SMALL ? 14 : 24);
+function scanScreen() {
+  lcd.fillScreen(BG);
+  lcd.fillRect(0, 0, W, TOP - 2, PANEL);
+  lcd.setTextDatum(lcd.TL);
+  lcd.setTextColor(ACCENT);
+  lcd.drawString("Videos", 4, 2, F);
+  lcd.setTextColor(lcd.WHITE);
+  lcd.drawString("Looking for videos...", 4, TOP + 4, F);
+}
+function scanStatus(dir) {
+  const h = SMALL ? 11 : 14;
+  lcd.fillRect(0, SY, W, 2 * h + 2, BG);
+  lcd.setTextDatum(lcd.TL);
+  lcd.setTextColor(lcd.LIGHTGREY);
+  lcd.drawString(fit(dir, W - 8), 4, SY, 1);
+  lcd.setTextColor(lcd.GREENYELLOW);
+  lcd.drawString(videos.length + (videos.length === 1 ? " video" : " videos") + " found", 4, SY + h, 1);
+}
 function scan(dir, depth) {
+  scanStatus(dir);  // before the listing: a folder with thousands of files takes a while
   let names = [];
   try { names = fs.list(dir); } catch (e) {}
   for (const n of names.sort()) {
@@ -23,13 +48,10 @@ function scan(dir, depth) {
     } else if (n.toLowerCase().endsWith(".avi")) videos.push((dir === "/" ? "" : dir) + "/" + n);
   }
 }
+scanScreen();
 scan("/sd", 0);
 scan("/", 1);  // the flash: just its top level
 
-let sel = 0, top = 0, playing = false, note = "", volume = audio.volume();
-const fit = (s, px) => { const n = Math.floor(px / (F === 1 ? 6 : 8)); return s.length > n ? s.slice(0, n - 1) + "~" : s; };
-const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1, p.length - 4);
-const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 function drawList() {
   lcd.fillScreen(BG);

@@ -85,15 +85,23 @@ try { prefs = JSON.parse(fs.read("/launcher.json") || "null"); } catch (e) {}
 if (!prefs || !Array.isArray(prefs.hidden)) prefs = { hidden: allScripts.filter((sc) => sc.big).map((sc) => sc.path), showHidden: false };
 const isHidden = (sc) => prefs.hidden.includes(sc.path);
 const savePrefs = () => fs.write("/launcher.json", JSON.stringify(prefs));
-let scripts = [], editing = false, esel = 0;
+// ---- the list editor is its own app (lib/listedit.js), so the menu stays small: it gets the app
+// list as ARG and comes back here when done
+const EDITOR = ["/lib/listedit.js", "/sd/lib/listedit.js"].find((p) => fs.exists(p));
+function openEditor() {
+  tone(1000, 20);
+  launch(EDITOR, JSON.stringify(allScripts.map(({ name, path, sd, big }) => ({ name, path, sd, big }))));
+}
+
+let scripts = [];
 function applyFilter() {
   const nHidden = allScripts.filter(isHidden).length;
   scripts = allScripts.filter((sc) => prefs.showHidden || !isHidden(sc)).map((sc) => ({ ...sc, hidden: isHidden(sc) }));
   if (nHidden) scripts.push({ name: prefs.showHidden ? "hide hidden apps" : `+ ${nHidden} hidden`, toggle: true });
-  scripts.push({ name: "edit list", edit: true });
+  if (EDITOR) scripts.push({ name: "edit list", edit: true });
 }
 applyFilter();
-function redraw() { if (editing) drawEditor(); else if (LIST) drawList(); else drawPage(); }
+function redraw() { if (LIST) drawList(); else drawPage(); }
 function toggleHidden() {
   prefs.showHidden = !prefs.showHidden;
   savePrefs();
@@ -102,93 +110,6 @@ function toggleHidden() {
   sel = 0;
   page = 0;
   redraw();
-}
-
-// ---- the list editor: every app with a box - ticked shows it, crossed hides it
-const ER = LIST_MODE() ? 18 : 26, ETOP = 24, EBOT = LIST_MODE() ? 12 : 34;
-function LIST_MODE() { return !board.hasTouch || H < 200; }
-const ePer = () => Math.max(1, Math.floor((H - ETOP - EBOT) / ER));
-function openEditor() { editing = true; esel = 0; tone(1000, 20); drawEditor(); }
-function closeEditor() { editing = false; applyFilter(); sel = 0; page = 0; tone(1200, 20); redraw(); }
-function flip(i) {
-  const sc = allScripts[i];
-  if (!sc) return;
-  if (isHidden(sc)) prefs.hidden = prefs.hidden.filter((p) => p !== sc.path);
-  else prefs.hidden.push(sc.path);
-  savePrefs();
-  tone(isHidden(sc) ? 600 : 1100, 15);
-  drawEditor();
-}
-function drawEditor() {
-  lcd.fillScreen(lcd.BLACK);
-  lcd.fillRect(0, 0, W, ETOP - 4, lcd.NAVY);
-  lcd.setTextDatum(lcd.ML);
-  lcd.setTextColor(lcd.YELLOW);
-  lcd.drawString("Show which apps?", 4, (ETOP - 4) / 2, 2);
-  if (!LIST_MODE()) {  // Done button
-    lcd.fillRoundRect(W - 64, 1, 60, ETOP - 6, 5, lcd.DARKGREEN);
-    lcd.setTextDatum(lcd.MC);
-    lcd.setTextColor(lcd.WHITE);
-    lcd.drawString("Done", W - 34, (ETOP - 4) / 2, 2);
-  }
-  const per = ePer(), first = Math.floor(esel / per) * per;
-  allScripts.slice(first, first + per).forEach((sc, k) => {
-    const i = first + k, y = ETOP + k * ER, shown = !isHidden(sc), bx = 6, by = y + (ER - 14) / 2;
-    if (LIST_MODE() && i === esel) lcd.fillRect(0, y, W, ER, lcd.color(30, 60, 90));
-    if (shown) {
-      lcd.fillRoundRect(bx, by, 14, 14, 3, lcd.color(30, 150, 70));
-      lcd.drawLine(bx + 3, by + 7, bx + 6, by + 10, lcd.WHITE);
-      lcd.drawLine(bx + 6, by + 10, bx + 11, by + 3, lcd.WHITE);
-    } else {
-      lcd.drawRoundRect(bx, by, 14, 14, 3, lcd.color(200, 60, 60));
-      lcd.drawLine(bx + 3, by + 3, bx + 10, by + 10, lcd.color(200, 60, 60));
-      lcd.drawLine(bx + 10, by + 3, bx + 3, by + 10, lcd.color(200, 60, 60));
-    }
-    lcd.setTextDatum(lcd.ML);
-    lcd.setTextColor(shown ? lcd.WHITE : lcd.DARKGREY);
-    lcd.drawString(sc.name.replace(".js", ""), 28, y + ER / 2, 2);
-    lcd.setTextDatum(lcd.MR);
-    if (sc.big) { lcd.setTextColor(lcd.ORANGE); lcd.drawString(sc.sd ? "big  SD" : "big", W - 8, y + ER / 2, 1); }
-    else if (sc.sd) { lcd.setTextColor(lcd.GREENYELLOW); lcd.drawString("SD", W - 8, y + ER / 2, 1); }
-  });
-  const pages = Math.max(1, Math.ceil(allScripts.length / per)), pg = Math.floor(esel / per);
-  lcd.setTextDatum(lcd.BC);
-  lcd.setTextColor(lcd.DARKGREY);
-  if (LIST_MODE()) {
-    lcd.setTextDatum(lcd.BL);
-    lcd.drawString("; . move  Enter show/hide  , / page  Bksp done", 4, H - 1, 1);
-  } else if (pages > 1) {
-    lcd.setTextDatum(lcd.MC);
-    const y = H - EBOT / 2;
-    if (pg > 0) { lcd.fillRoundRect(10, y - 13, 80, 26, 6, lcd.DARKGREY); lcd.setTextColor(lcd.WHITE); lcd.drawString("< prev", 50, y, 2); }
-    if (pg < pages - 1) { lcd.fillRoundRect(W - 90, y - 13, 80, 26, 6, lcd.DARKGREY); lcd.setTextColor(lcd.WHITE); lcd.drawString("next >", W - 50, y, 2); }
-    lcd.setTextColor(lcd.LIGHTGREY);
-    lcd.drawString(`${pg + 1} / ${pages}`, W / 2, y, 2);
-  }
-  lcd.setTextDatum(lcd.TL);
-}
-function editorTouch(x, y) {
-  if (y < ETOP - 2) { if (x > W - 70) closeEditor(); return; }
-  const per = ePer(), pages = Math.max(1, Math.ceil(allScripts.length / per)), pg = Math.floor(esel / per);
-  if (y >= H - EBOT) {
-    if (x < W / 3 && pg > 0) esel = (pg - 1) * per;
-    else if (x > (W * 2) / 3 && pg < pages - 1) esel = (pg + 1) * per;
-    else return;
-    return drawEditor();
-  }
-  const k = Math.floor((y - ETOP) / ER);
-  if (k >= 0 && k < per) flip(pg * per + k);
-}
-function editorKey(key) {
-  const n = allScripts.length, per = ePer();
-  if (key === "ArrowDown" || key === ".") esel = (esel + 1) % n;
-  else if (key === "ArrowUp" || key === ";") esel = (esel + n - 1) % n;
-  else if (key === "ArrowRight" || key === "/") esel = Math.min(n - 1, esel + per);
-  else if (key === "ArrowLeft" || key === ",") esel = Math.max(0, esel - per);
-  else if (key === "Enter" || key === " ") return flip(esel);
-  else if (key === "Backspace" || key === "q") return closeEditor();
-  else return;
-  drawEditor();
 }
 
 const COLS = 2, BW = (W - 30) / COLS, BH = 32, GAP = 6, TOP = 40, NAV = 34;
@@ -295,7 +216,6 @@ function run(b) {
 
 const hit = (b, x, y) => x >= b.x && x < b.x + BW && y >= b.y && y < b.y + BH;
 touch.on("down", ({ x, y }) => {
-  if (editing) return editorTouch(x, y);
   if (y < TOP - 4 && soundTouch(x)) return;
   const pages = pageCount();
   if (y >= H - NAV && pages > 1) {
@@ -373,7 +293,6 @@ if (board.hasBattery)
 
 if (LIST) {
   keyboard.on("key", ({ key }) => {
-    if (editing) return editorKey(key);
     if (key === "m" || key === "M") { setSound(sound.volume, !sound.muted); return drawList(); }
     if (key === "-" || key === "_") { setSound(sound.volume - 10, false); return drawList(); }
     if (key === "=" || key === "+") { setSound(sound.volume + 10, false); return drawList(); }

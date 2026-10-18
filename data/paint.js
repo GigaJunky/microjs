@@ -35,7 +35,7 @@ function drawBar() {
 // Keyboard painting works on a grid of G x G blocks, remembered in `blocks` so the cursor can
 // be drawn over the picture and the block underneath repainted when it moves.
 const G = 4, GC = Math.floor(W / G), GR = Math.floor((H - BAR) / G);
-const blocks = new Array(GC * GR).fill(0);
+const blocks = new Array(board.hasKeyboard ? GC * GR : 0).fill(0);  // (~60 KB: not on a touch-only CYD)
 let cx = Math.floor(GC / 2), cy = Math.floor(GR / 2);
 
 function paintBlock(x, y, c) { lcd.fillRect(x * G, BAR + y * G, G, G, c); }

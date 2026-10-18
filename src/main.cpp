@@ -107,6 +107,7 @@ static void prompt() {
 
 static void newInterp() {
   delete I;
+  js::poolTrim();  // the old interpreter's spilled pool chunks back to the heap: a clean start
   I = new js::Interp();
   I->write = [](const char* s, size_t n) { term(s, n); };
   I->millis = []() { return (uint32_t)millis(); };
@@ -383,8 +384,8 @@ static void runMain() {
   std::string src;
   const char* path = hwReadFile("/sd/main.js", src) ? "/sd/main.js" : hwReadFile("/main.js", src) ? "/main.js" : nullptr;
   if (!path) return;
-  // as launched apps do: free the source once parsed - the menu is big, and on a board without
-  // PSRAM (the CYD) keeping its 17 KB of text left it too little memory to run
+  // as launched apps do: free the source once parsed, for the menu to run in (on a board without
+  // PSRAM, the CYD, it needs that room)
   I->dropSourceAfterParse = true;
   I->runSafe(src, path);
 }

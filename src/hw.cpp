@@ -2179,7 +2179,7 @@ bool hwReadFile(const std::string& path, std::string& out) {
   // Loading a file is one contiguous allocation its whole size. When the heap is too fragmented
   // to hold it, fail gracefully here: on this board a failed operator new aborts (the C++ runtime
   // can't raise the out-of-memory exception when memory is this low), which would crash the board.
-  if (sz + 2048 > heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) { file.close(); return false; }
+  if (sz + 512 > heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) { file.close(); return false; }
   out.clear();
   out.reserve(sz);
   char buf[512];

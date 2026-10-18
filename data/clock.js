@@ -1,5 +1,7 @@
 // Analog + digital clock. With WiFi set in micro-js.json it gets the real time over NTP, shifted
 // by utcOffsetHours (e.g. -5); without WiFi it starts at 12:00:00 and counts from there.
+// @needs-more-memory (WiFi needs ~40 KB: too much for an original ESP32 without PSRAM - the CYD's
+// launcher hides it at first)
 const cfg = readConfig();
 const WIFI = cfg.wifi ?? {};
 const OFFSET_S = (cfg.utcOffsetHours ?? 0) * 3600;

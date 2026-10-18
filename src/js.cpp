@@ -11,25 +11,45 @@
 namespace js {
 
 // Interned strings live forever; property names and identifiers are compared by pointer.
-// They (and the hash set's nodes) are packed into pool memory: as individual heap blocks they
-// would be permanent crumbs scattered all over the heap.
-using AtomSet = std::unordered_set<std::string_view, std::hash<std::string_view>, std::equal_to<std::string_view>,
-                                   PoolAlloc<std::string_view>>;
-static AtomSet& atomTable() {
-  static auto* tab = new AtomSet();
-  return *tab;
-}
-static char* atomChars(size_t n) {  // bump-allocate atom text in 256-byte pool chunks
+// They (and the hash set's nodes) get storage of their own: 1 KB blocks used only for atoms. Mixed
+// into the general pool, a few hundred atoms pinned dozens of pool chunks all over the heap (one live
+// atom keeps its whole chunk), so poolTrim() could give little back and, on a board without PSRAM,
+// no block was left big enough to load the next app. Atoms are never removed.
+static char* atomBump(size_t n) {
   static char *chunk = nullptr, *end = nullptr;
-  if (n > 128) return (char*)poolAlloc(n);
+  n = (n + 7) & ~(size_t)7;
+  if (n > 256) return (char*)malloc(n);
   if (!chunk || chunk + n > end) {
-    chunk = (char*)poolAlloc(256);
-    end = chunk + 256;
+    chunk = (char*)malloc(1024);
+    if (!chunk) throw std::bad_alloc();
+    end = chunk + 1024;
   }
   char* p = chunk;
   chunk += n;
   return p;
 }
+template <class T>
+struct AtomAlloc {  // nodes from atomBump (never freed); the bucket array is one malloc'd block
+  using value_type = T;
+  AtomAlloc() = default;
+  template <class U> AtomAlloc(const AtomAlloc<U>&) {}
+  T* allocate(size_t n) {
+    if (n == 1) return reinterpret_cast<T*>(atomBump(sizeof(T)));
+    void* p = malloc(n * sizeof(T));
+    if (!p) throw std::bad_alloc();
+    return static_cast<T*>(p);
+  }
+  void deallocate(T* p, size_t n) { if (n != 1) free(p); }
+  template <class U> bool operator==(const AtomAlloc<U>&) const { return true; }
+  template <class U> bool operator!=(const AtomAlloc<U>&) const { return false; }
+};
+using AtomSet = std::unordered_set<std::string_view, std::hash<std::string_view>, std::equal_to<std::string_view>,
+                                   AtomAlloc<std::string_view>>;
+static AtomSet& atomTable() {
+  static auto* tab = new AtomSet();
+  return *tab;
+}
+static char* atomChars(size_t n) { return atomBump(n); }
 const char* findAtom(const char* s, size_t n) {
   auto& t = atomTable();
   auto it = t.find(std::string_view(s, n));
@@ -56,6 +76,7 @@ void* poolAlloc(size_t n) { return ::operator new(n); }
 void poolFree(void* p, size_t) { ::operator delete(p); }
 void poolReserve(size_t, void*) {}
 size_t poolRegionLeft() { return 0; }
+size_t poolTrim() { return 0; }
 #else
 static const size_t POOL_MAX = 256;           // larger blocks go to the system allocator
 static void* poolFreeList[POOL_MAX / 8 + 1];  // one free list per 8-byte size class
@@ -69,22 +90,81 @@ void poolReserve(size_t bytes, void* mem) {
   if (!poolRegion && (poolRegion = (char*)(mem ? mem : malloc(bytes)))) poolRegionEnd = poolRegion + bytes;
 }
 
+// Chunks taken from the system heap once the region ran out. A chunk stays with its size class,
+// so these used to stay in the pool for good, scattered through the heap: after a big app (the
+// menu) no block was left big enough to load the next app's file - on the CYD, every app then
+// failed with "cannot read the file". poolTrim() gives back the ones that are wholly free.
+struct PoolSpill { char* p; uint32_t len, carved, freeBytes; bool viaNew; };
+static PoolSpill spills[256];
+static int nSpills = 0;
+static bool lastChunkSpilled, lastChunkViaNew;
+
 // A fresh chunk for size class `size`: from the reserved region, else the system heap.
 // Returns the chunk and stores its length in `len`.
 static char* poolChunk(size_t size, size_t& len) {
   len = size <= 128 ? 1024 : 2048;
+  lastChunkSpilled = false;
   if (poolRegion && poolRegion + len <= poolRegionEnd) {
     char* c = poolRegion;
     poolRegion += len;
     return c;
   }
+  lastChunkSpilled = true;
+  lastChunkViaNew = false;
   // fragmented heap: settle for a smaller chunk before giving up
   for (size_t want = len;; want = want / 2 > size ? want / 2 : size) {
     if (char* c = (char*)sysAlloc(want)) { len = want; return c; }
     if (want == size) break;
   }
   len = size;
+  lastChunkViaNew = true;
   return (char*)::operator new(size);  // last resort: may release the out-of-memory reserve
+}
+
+static int spillOf(const char* b) {  // the spilled chunk holding b (spills sorted), or -1
+  int lo = 0, hi = nSpills - 1, k = -1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (spills[mid].p <= b) { k = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return k >= 0 && b < spills[k].p + spills[k].len ? k : -1;
+}
+
+size_t poolTrim() {
+  if (!nSpills) return 0;
+  std::sort(spills, spills + nSpills, [](const PoolSpill& a, const PoolSpill& b) { return a.p < b.p; });
+  for (int k = 0; k < nSpills; k++) spills[k].freeBytes = 0;
+  for (size_t cls = 1; cls <= POOL_MAX / 8; cls++)
+    for (char* b = (char*)poolFreeList[cls]; b; b = *(char**)b) {
+      int k = spillOf(b);
+      if (k >= 0) spills[k].freeBytes += cls << 3;
+    }
+  // a chunk is free when every block carved from it is on a free list (blocks split by poolSteal
+  // may leave a few bytes uncounted: such a chunk just stays)
+  bool any = false;
+  for (int k = 0; k < nSpills; k++) any |= spills[k].freeBytes >= spills[k].carved;
+  if (!any) return 0;
+  for (size_t cls = 1; cls <= POOL_MAX / 8; cls++) {
+    void** link = &poolFreeList[cls];
+    while (*link) {
+      int k = spillOf((char*)*link);
+      if (k >= 0 && spills[k].freeBytes >= spills[k].carved) *link = *(void**)*link;  // unlink
+      else link = (void**)*link;
+    }
+  }
+  size_t freed = 0;
+  int keep = 0;
+  for (int k = 0; k < nSpills; k++) {
+    if (spills[k].freeBytes >= spills[k].carved) {
+      freed += spills[k].len;
+      if (spills[k].viaNew) ::operator delete(spills[k].p);
+      else free(spills[k].p);
+    } else {
+      spills[keep++] = spills[k];
+    }
+  }
+  nSpills = keep;
+  return freed;
 }
 
 // Refill an empty size class by splitting a free block of a larger class.
@@ -94,9 +174,14 @@ static bool poolSteal(size_t cls) {
     char* b = (char*)poolFreeList[big];
     if (!b) continue;
     poolFreeList[big] = *(void**)b;
-    for (size_t off = 0; off + size <= (big << 3); off += size) {
+    size_t off = 0;
+    for (; off + size <= (big << 3); off += size) {
       *(void**)(b + off) = poolFreeList[cls];
       poolFreeList[cls] = b + off;
+    }
+    if (size_t rest = (big << 3) - off) {  // the leftover too, or its chunk could never be trimmed
+      *(void**)(b + off) = poolFreeList[rest >> 3];
+      poolFreeList[rest >> 3] = b + off;
     }
     return true;
   }
@@ -120,6 +205,8 @@ void* poolAlloc(size_t n) {
       *(void**)(c + off) = poolFreeList[cls];
       poolFreeList[cls] = c + off;
     }
+    if (lastChunkSpilled && nSpills < (int)(sizeof spills / sizeof spills[0]))  // (else it just stays)
+      spills[nSpills++] = {c, (uint32_t)chunk, (uint32_t)(chunk / size * size), 0, lastChunkViaNew};
     p = poolFreeList[cls];
   }
   poolFreeList[cls] = *(void**)p;

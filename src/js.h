@@ -56,6 +56,7 @@ void* poolAlloc(size_t n);
 void poolFree(void* p, size_t n);
 void poolReserve(size_t bytes, void* mem = nullptr);  // once at startup: a contiguous region for the pool
 size_t poolRegionLeft();         // unused bytes left in that region
+size_t poolTrim();               // give wholly free chunks taken from the system heap back to it
 // Where the interpreter's memory comes from once its reserved regions are used up (and for blocks
 // over 256 bytes). nullptr = malloc. On a board with PSRAM, point it at PSRAM: the system malloc
 // keeps blocks under 4 KB in internal RAM, and pool chunks are never given back, so overflow

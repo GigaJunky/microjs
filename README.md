@@ -54,7 +54,7 @@ setInterval(() => led(0, Math.random() * 40, 0), 200);
 
 | Profile (`-e ...`) | Board | Status |
 |---|---|---|
-| `cyd` | ESP32-2432S028R "Cheap Yellow Display" (one USB port) | tested |
+| `cyd` | ESP32-2432S028R "Cheap Yellow Display" (one USB port) | tested; limited: no PSRAM, so the big and WiFi apps may run out of memory |
 | `cyd2usb` | CYD variant with two USB ports (ST7789 panel) | builds; same board otherwise |
 | `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery |
 | `cardputer-adv` | M5Stack Cardputer ADV: ESP32-S3, 240×135 ST7789, 56-key keyboard, ES8311 audio, battery, no touch, no PSRAM | tested: display, keyboard, sound, LED, SD |
@@ -523,9 +523,15 @@ highlighted app) and every game work with a pad. Some games read it directly:
   declarations are.
 
 **Big apps on small boards:** an app with a `@needs-more-memory` comment (the video and music
-players, the demo, the web remote, the file manager, the dungeon and shooting games, fetch) is big
-for an original ESP32 without PSRAM: the classic CYD's launcher hides them at first ("edit list"
-or "+ N hidden" shows them). They may run out of memory there.
+players, the demo, the web remote, the file manager, the dungeon and shooting games, fetch, and the
+clock - WiFi alone takes about 40 KB) is big for an original ESP32 without PSRAM: the classic CYD's
+launcher hides them at first ("edit list" or "+ N hidden" shows them). They may run out of memory
+there.
+
+**The classic CYD is a limited board.** With no PSRAM it has about 100 KB for scripts, and the
+games and small apps run well; the big apps above, and anything using WiFi, are at the edge of its
+memory and may stop with "out of memory". Boards with PSRAM (the S3 CYD, the CoCo VGA board, the
+Cardputer) run everything.
 
 **Memory and speed:**
 - The interpreter task has a 40 KB stack, which allows about 35 levels of JS recursion.

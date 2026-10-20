@@ -732,6 +732,7 @@ JS_NATIVE(sim_joystick_read) {
   return Value::obj(o);
 }
 JS_NATIVE(sim_joystick_count) { (void)I; (void)self; (void)args; (void)argc; return Value::num(0); }
+JS_NATIVE(espnow_mac) { (void)self; (void)args; (void)argc; return I.str("02:00:00:00:00:01"); }  // the simulator has no radio: espnow.send goes nowhere
 JS_NATIVE(wifi_true) { (void)I; (void)self; (void)args; (void)argc; return Value::boolean(true); }
 static Value httpResult(Interp& I, int status, const std::string& body) {
   Object* o = I.newObject();
@@ -972,6 +973,14 @@ void simInstall(Interp& I, const std::string& root) {
   I.def(web, "stop", web_nop);
   I.def(web, "url", web_url);
   I.setGlobal("web", Value::obj(web));
+  Object* espnow = I.newObject();
+  I.def(espnow, "begin", wifi_true);
+  I.def(espnow, "send", wifi_true);
+  I.def(espnow, "on", web_nop);
+  I.def(espnow, "off", web_nop);
+  I.def(espnow, "stop", web_nop);
+  I.def(espnow, "mac", espnow_mac);
+  I.setGlobal("espnow", Value::obj(espnow));
   Object* fsObj = I.newObject();
   I.def(fsObj, "read", fs_read);
   I.def(fsObj, "write", fs_write);

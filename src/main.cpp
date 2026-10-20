@@ -362,7 +362,7 @@ static void runLaunched() {
   // even raise the out-of-memory exception to catch - it aborts. So free memory BEFORE the read:
   // always the HTTP reserve, and the whole WiFi driver unless the next app needs it (peek first,
   // without loading the file whole). The launched app re-reserves / reconnects as needed.
-  bool usesWifi = hwFileContains(path, "wifi.connect");
+  bool usesWifi = hwFileContains(path, "wifi.connect") || hwFileContains(path, "espnow.");  // (espnow needs the radio too)
   hwWifiPrepare(usesWifi);  // (false) also frees the net reserve + radio; (true) ensures WiFi
   hwNetRelease();           // drop the HTTP reserve either way so the read has contiguous room
   if (I) I->gcPending = false;

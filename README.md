@@ -428,6 +428,30 @@ There's no password: anyone on your network can open the pages.
 
 To save about 600 KB of flash, set `-DJS_WIFI=0` in `platformio.ini`.
 
+### `espnow` (boards talking to each other, WiFi build)
+
+ESP-NOW sends small messages straight from one ESP32 to another over the 2.4 GHz radio: no router,
+no connection, no IP address. A message is up to 250 bytes; range is tens of metres indoors. It
+works on the ESP32 boards (not the RP2350-PiZero, which has no radio) and can run while the board
+is joined to WiFi, but then both boards must be on the router's channel.
+
+| Call | Notes |
+|---|---|
+| `espnow.begin([channel])` | starts it; returns `true`. `channel` (1-13) sets the radio channel, ignored while joined to a router (then the router's channel is used). Both boards need the same channel |
+| `espnow.send(mac, data)` | `mac` is `"AA:BB:CC:DD:EE:FF"` or `"*"` for every board in range; `data` is a string or an array of bytes (250 at most). Returns `true` when queued: there's no delivery confirmation or retry, so acknowledge in your own protocol if it matters |
+| `espnow.on("message", ({mac, data}) => ...)` | `data` is a string; use `JSON.stringify` / `JSON.parse` for objects. `espnow.off()` removes it |
+| `espnow.mac()` | this board's address, to give to the other boards |
+| `espnow.stop()` | leaving the app stops it too |
+
+On the classic CYD memory is very tight once the radio is up: a script can't be much more than 8 KB, and loading `lib/mixer.js` there aborts the board, so `espnow.js` uses `lib/litemixer.js` instead. The WiFi driver can only start while memory is still clean, so call `espnow.begin()` in a script that
+mentions `espnow.` (the board starts WiFi before it loads such a script); typing it at the REPL there fails with "the WiFi
+driver failed to start". Tested: classic CYD and CYD-S3, in both directions, broadcast and to one address, string and byte-array data.
+
+Messages aren't encrypted or authenticated: anything nearby can read and send them. At most 20
+different addresses can be sent to in one run. `espnow.js` is a radio version of `remote.js` (shared LED mixer, beep, chat; messages are small JSON
+broadcasts such as `{"t":"led","r":0,"g":200,...}`, `{"t":"beep"}` and `{"t":"chat","n":"name","m":"text"}`). The simulator has the calls but no radio.
+
+
 ## Examples (`data/`)
 
 | Script | Shows |
@@ -441,6 +465,7 @@ To save about 600 KB of flash, set `-DJS_WIFI=0` in `platformio.ini`.
 | `remote.js` | a web remote: open the address it shows on a phone or computer for the LED mixer, a beep button and a chat with the board (the page is `remote.html`). If it can't join your WiFi it makes its own network (`micro-js-xxxx`, or `"ap": {"ssid", "pass"}` in `micro-js.json`) and phones that join get the page by themselves |
 | `demo.js` | a demoscene show - plasma, starfield, a shaded cube, copper bars and a scroller - to an original chiptune (tap / Space: next effect, `m`: music) |
 | `neopix.js` | drives a WS2812 / NeoPixel strip or matrix from a GPIO (CYD: CN1, GPIO 27 or 22): pick the pin, LED count, grid columns, wiring (zigzag or not), pattern (rainbow, chase, scanner, fire, plasma, ripple, rain...), colour, speed and brightness, with a live preview. ESP32 only; tested on the classic CYD |
+| `espnow.js` | what `remote.js` does, board to board over ESP-NOW with no router: a shared LED colour mixer (move a slider on one board and every board's LED follows), Beep that beeps the other boards, and chat (type on a keyboard board, or the Say button steps through ready-made messages on a touch board) |
 | `life.js` | Conway's Game of Life, redrawing only cells that change |
 | `fetch.js` | fetches weather + stocks (+ news) and writes them to small cache files, then launches `weather.js`. The one app that uses WiFi. See "The weather dashboard" below |
 | `weather.js` | the dashboard display: now / hourly / 5 days / stocks / news (°C and °F). Reads the cache files `fetch.js` wrote - no WiFi - so it stays light. Tap left/right (or `,` `/`) to change page; pages rotate every 30 s |
@@ -636,6 +661,7 @@ src/boards/coco-vga/  the ESP32-CoCo board's VGA screen and USB input (only that
 lib/                  ESP32-S3-VGA and SoftUSB, used only by the coco-vga profile
 data/                 the apps -> flashed with `pio run -t uploadfs`
 data/lib/mixer.js     the LED colour mixer, loaded by controls.js, bruce.js and remote.js
+data/lib/litemixer.js  a small version of that mixer, for the classic CYD with the radio on (espnow.js)
 host/                 desktop build, simulator, test suite (stb_image.h: picture loading)
 tools/upload.js       copy files to the board over serial (npm install first)
 tools/web-ide.html    browser IDE over USB: files, editor, upload, console, firmware flashing

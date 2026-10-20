@@ -16,6 +16,8 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #endif
 #include <memory>
 #if !MICROJS_RP2
@@ -51,6 +53,7 @@ static fs::FS* pickFs(const std::string& path, std::string& rel);  // "/sd/..." 
 static WebServer* webServer = nullptr;  // web.start's server (see "web:" below)
 static DNSServer* dnsServer = nullptr;  // wifi.ap's captive portal: every name -> the board
 static void webStop();
+static void nowStop();  // espnow.stop(): before the radio is turned off or an app ends
 #endif
 // Sound level for tones and music: audio.volume(0..100) and audio.mute(on). On a PWM beeper only
 // silence is possible, so there any volume above 0 sounds the same.
@@ -2655,6 +2658,7 @@ static void netReserveRelease() {
 // deinitialises a driver that is still busy stopping: that crashes the board or leaves WiFi
 // dead until reset. Abort the connect first and give the driver time to settle.
 static void wifiOff() {
+  nowStop();
   if (dnsServer) { dnsServer->stop(); delete dnsServer; dnsServer = nullptr; }
   if (WiFi.getMode() & WIFI_AP) WiFi.softAPdisconnect(true);
   if (WiFi.getMode() == WIFI_OFF) return;
@@ -2972,6 +2976,118 @@ void hwYield() {
 }
 #endif
 
+#if JS_WIFI
+// ------------------------------------------------------------------ espnow: boards talking directly
+//   espnow.begin([channel]) -> true; espnow.send(mac, data) -> queued; espnow.on("message", fn);
+//   espnow.off(); espnow.mac(); espnow.stop()
+// ESP-NOW is connectionless 2.4 GHz messaging between ESP32s, up to 250 bytes a message, no router.
+// mac is "AA:BB:CC:DD:EE:FF" or "*" (everyone in range); data is a string or an array of bytes.
+// A message arrives as ({ mac, data }) in fn, from the app's own event loop (hwPoll). Packets
+// reach the radio task, which only queues them; nothing here runs JavaScript off the main task.
+static Object* nowHandlers = nullptr;
+struct NowMsg { uint8_t mac[6]; uint8_t len; uint8_t data[250]; };
+static const int NOW_QUEUE = 6;
+static NowMsg nowQ[NOW_QUEUE];
+static volatile int nowHead = 0, nowTail = 0;  // one producer (the radio task), one consumer (hwPoll)
+static bool nowOn = false;
+
+static void nowRecv(const uint8_t* mac, const uint8_t* data, int len) {
+  int next = (nowHead + 1) % NOW_QUEUE;
+  if (next == nowTail || len < 0 || len > 250) return;  // full: drop the newest
+  memcpy(nowQ[nowHead].mac, mac, 6);
+  memcpy(nowQ[nowHead].data, data, len);
+  nowQ[nowHead].len = (uint8_t)len;
+  __sync_synchronize();
+  nowHead = next;
+}
+static void nowStop() {
+  if (nowOn) esp_now_deinit();
+  nowOn = false;
+  nowTail = nowHead;
+  if (nowHandlers) nowHandlers->props.clear();
+}
+static bool parseMac(const std::string& t, uint8_t mac[6]) {
+  if (t == "*") { memset(mac, 0xFF, 6); return true; }
+  unsigned v[6];
+  char tail;
+  if (sscanf(t.c_str(), "%x:%x:%x:%x:%x:%x%c", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &tail) != 6) return false;
+  for (int i = 0; i < 6; i++) { if (v[i] > 255) return false; mac[i] = (uint8_t)v[i]; }
+  return true;
+}
+static std::string macString(const uint8_t* m) {
+  char b[18];
+  snprintf(b, sizeof b, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+  return b;
+}
+JS_NATIVE(now_begin) {
+  (void)self;
+  if (WiFi.getMode() == WIFI_OFF && !wifiOn()) I.throwError("Error", "espnow: the WiFi driver failed to start - restart the board");
+  int ch = argc > 0 ? IA(0) : 0;
+  if (ch >= 1 && ch <= 13 && WiFi.status() != WL_CONNECTED) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);  // a joined router decides the channel
+  if (!nowOn) {
+    if (esp_now_init() != ESP_OK) return Value::boolean(false);
+    esp_now_register_recv_cb(nowRecv);
+    nowHead = nowTail = 0;
+    nowOn = true;
+  }
+  return Value::boolean(true);
+}
+JS_NATIVE(now_send) {
+  (void)self;
+  if (!nowOn) I.throwError("Error", "espnow.send: call espnow.begin() first");
+  uint8_t mac[6];
+  if (!parseMac(I.toStr(JS_ARG(0)), mac)) I.throwError("Error", "espnow.send: the address must be \"AA:BB:CC:DD:EE:FF\" or \"*\"");
+  uint8_t buf[250];
+  size_t n = 0;
+  Value d = JS_ARG(1);
+  if (d.isStr()) {
+    n = d.s()->s.size();
+    if (n > 250) I.throwError("Error", "espnow.send: a message is 250 bytes at most");
+    memcpy(buf, d.s()->s.data(), n);
+  } else {
+    std::vector<Value> list = I.toList(d);
+    if (list.size() > 250) I.throwError("Error", "espnow.send: a message is 250 bytes at most");
+    for (Value& v : list) buf[n++] = (uint8_t)I.toInt32(v);
+  }
+  if (!esp_now_is_peer_exist(mac)) {
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0;  // the channel the radio is on
+    peer.ifidx = (WiFi.getMode() & WIFI_STA) ? WIFI_IF_STA : WIFI_IF_AP;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) != ESP_OK) return Value::boolean(false);  // the peer list is full (20)
+  }
+  return Value::boolean(esp_now_send(mac, buf, n) == ESP_OK);
+}
+JS_NATIVE(now_on) {
+  (void)self;
+  if (!I.isCallable(JS_ARG(1))) I.throwError("TypeError", "espnow.on(\"message\", fn)");
+  I.setOwn(nowHandlers, I.toStr(JS_ARG(0)).c_str(), args[1]);
+  return Value();
+}
+JS_NATIVE(now_off) { (void)self; (void)args; (void)argc; (void)I; nowHandlers->props.clear(); return Value(); }
+JS_NATIVE(now_mac) { (void)self; (void)args; (void)argc; uint8_t m[6]; esp_read_mac(m, ESP_MAC_WIFI_STA); return I.str(macString(m)); }
+JS_NATIVE(now_stop) { (void)I; (void)self; (void)args; (void)argc; nowStop(); return Value(); }
+
+static void nowPoll(Interp& I) {
+  for (int k = 0; k < 4 && nowTail != nowHead; k++) {  // a few a pass, so a flood can't starve the app
+    NowMsg m = nowQ[nowTail];
+    __sync_synchronize();
+    nowTail = (nowTail + 1) % NOW_QUEUE;
+    Prop* p = nowHandlers->own("message");
+    if (!p || !I.isCallable(p->v)) continue;
+    size_t mark = I.temps.size();
+    Value fn = p->v;
+    I.rootTemp(fn);
+    Object* e = I.newObject();
+    I.setOwn(e, "mac", I.str(macString(m.mac)));
+    I.setOwn(e, "data", I.str(std::string((const char*)m.data, m.len)));
+    I.callSafe(fn, Value(), {Value::obj(e)});
+    I.temps.resize(mark);
+  }
+}
+#endif
+
 void hwService() {
 #ifdef BOARD_SCREEN_HEADER
   tft.service();
@@ -3000,6 +3116,7 @@ void hwReset() {
   videoStopWait();  // leaving an app stops its video
 #if JS_WIFI
   webStop();  // and its web server
+  nowStop();  // and its espnow
 #endif
 #if HAS_MUSIC
   mp3StopWait();  // leaving an app stops its music
@@ -3055,7 +3172,11 @@ void hwWifiPrepare(bool use) {
 // console is up; unhandled keys are typed into it (hwConsoleKey, in main.cpp). 6x8 font.
 bool hwHasHandlers() {
   return (keyHandlers && !keyHandlers->props.empty()) || (touchHandlers && !touchHandlers->props.empty()) ||
-         (joyHandlers && !joyHandlers->props.empty());
+         (joyHandlers && !joyHandlers->props.empty())
+#if JS_WIFI
+         || (nowHandlers && !nowHandlers->props.empty())
+#endif
+         ;
 }
 #if BOARD_KEYBOARD != KEYBOARD_NONE
 static const int CON_MAX_COLS = 64, CON_MAX_ROWS = 40;
@@ -3230,6 +3351,7 @@ void hwPoll(Interp& I) {
 #if JS_WIFI
   if (dnsServer) dnsServer->processNextRequest();  // captive portal DNS (wifi.ap)
   if (webServer) webServer->handleClient();  // answer web requests (web.on handlers)
+  if (nowOn) nowPoll(I);  // espnow messages
 #endif
   static uint32_t last = 0;
   static bool down = false;
@@ -3647,6 +3769,16 @@ void hwInstall(Interp& I) {
   I.def(web, "stop", web_stop);
   I.def(web, "url", web_url);
   I.setGlobal("web", Value::obj(web));
+  nowHandlers = I.newObject();
+  I.roots.push_back(Value::obj(nowHandlers));
+  Object* espnow = I.newObject();
+  I.def(espnow, "begin", now_begin);
+  I.def(espnow, "send", now_send);
+  I.def(espnow, "on", now_on);
+  I.def(espnow, "off", now_off);
+  I.def(espnow, "mac", now_mac);
+  I.def(espnow, "stop", now_stop);
+  I.setGlobal("espnow", Value::obj(espnow));
 #endif
   I.temps.clear();
 }

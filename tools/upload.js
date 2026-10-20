@@ -7,11 +7,15 @@
 //   node tools/upload.js /dev/ttyUSB0 data/paint.js --run            upload and run it, showing its output
 //   node tools/upload.js COM5 myapp.js --as main.js                  upload as the boot script
 //   node tools/upload.js /dev/ttyACM0 song.mp3 pic.jpg --to /sd/music    into a folder (here on the SD card)
+//   node tools/upload.js /dev/ttyACM0 micro-js-1.1.74-apps.zip       install the apps: a release's apps zip...
+//   node tools/upload.js /dev/ttyACM0 data/                          ...or a folder, with its sub-folders
+//                                  (the board's own micro-js.json is kept; a zip or folder's is skipped if it exists)
 //
 // It talks to the board's REPL: each piece of a file goes as base64 (fs.writeBase64) to a temporary
 // name, then replaces the real one, so an interrupted upload never leaves half a file.
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
+import { inflateRawSync } from "node:zlib";
 
 let SerialPort;
 try {
@@ -37,7 +41,7 @@ for (let i = 0; i < args.length; i++) {
   else files.push(a);
 }
 function usage(code) {
-  console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 12).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   process.exit(code);
 }
 if (!portPath || !files.length) usage(2);
@@ -79,8 +83,38 @@ function call(expr, timeout = 15000) {
 const q = JSON.stringify;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function upload(local, remote) {
-  const bytes = readFileSync(local), tmp = remote + ".part", CHUNK = 480;
+// the files of a .zip (stored or deflated; no zip64): [{ name, bytes }]
+function readZip(buf) {
+  let e = buf.length - 22;
+  while (e >= 0 && buf.readUInt32LE(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error("not a zip file");
+  const out = [];
+  let p = buf.readUInt32LE(e + 16);
+  for (let n = buf.readUInt16LE(e + 10); n > 0; n--) {
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
+    const nameLen = buf.readUInt16LE(p + 28), skip = buf.readUInt16LE(p + 30) + buf.readUInt16LE(p + 32), local = buf.readUInt32LE(p + 42);
+    const name = buf.toString("utf8", p + 46, p + 46 + nameLen);
+    p += 46 + nameLen + skip;
+    if (name.endsWith("/")) continue;
+    const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28), data = buf.subarray(start, start + csize);
+    if (method !== 0 && method !== 8) throw new Error(`${name}: unsupported zip compression`);
+    out.push({ name, bytes: method === 0 ? data : inflateRawSync(data) });
+  }
+  return out;
+}
+// the files under a folder, leaving out what a board keeps for itself (settings, high scores)
+function readTree(root, rel = "") {
+  const out = [];
+  for (const n of readdirSync(join(root, rel)).sort()) {
+    const r = rel ? rel + "/" + n : n;
+    if (statSync(join(root, r)).isDirectory()) out.push(...readTree(root, r));
+    else if (!/\.(hi|part)$/.test(n) && !(rel === "" && /^(sound|touchcal|launcher)\.json$/.test(n))) out.push({ name: r, bytes: readFileSync(join(root, r)) });
+  }
+  return out;
+}
+
+async function upload(local, remote, data) {
+  const bytes = data || readFileSync(local), tmp = remote + ".part", CHUNK = 480;
   if (!bytes.length && !(await call(`fs.writeBase64(${q(tmp)}, "")`))) throw new Error("can't write " + remote);
   for (let off = 0; off < bytes.length; off += CHUNK) {
     const b64 = bytes.subarray(off, off + CHUNK).toString("base64");
@@ -104,7 +138,22 @@ try {
   if (!v) console.warn("note: this board's firmware is older than this tool expects - flash a current release");
   if (dir && dir !== "/" && !(await call(`fs.exists(${q(dir)})`))) await call(`fs.mkdir(${q(dir)})`);
   let last = null;
+  const bundle = async (label, list) => {  // a zip or folder: everything into dir, making sub-folders
+    const made = new Set();
+    for (const { name, bytes } of list) {
+      const remote = dir + "/" + name, parts = name.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        const d = dir + "/" + parts.slice(0, i).join("/");
+        if (!made.has(d)) { made.add(d); if (!(await call(`fs.exists(${q(d)})`))) await call(`fs.mkdir(${q(d)})`); }
+      }
+      if (name === "micro-js.json" && (await call(`fs.exists(${q(remote)})`))) { console.log(`${remote} kept (the board's own settings)`); continue; }
+      await upload(label + "/" + name, remote, bytes);
+    }
+    console.log(`installed ${list.length} files from ${label} into ${dir || "/"}`);
+  };
   for (const f of files) {
+    if (/\.zip$/i.test(f)) { await bundle(basename(f), readZip(readFileSync(f))); continue; }
+    if (statSync(f).isDirectory()) { await bundle(f.replace(/\/+$/, ""), readTree(f)); continue; }
     last = (dir === "" ? "" : dir) + "/" + (opt.as || basename(f));
     await upload(f, last);
   }

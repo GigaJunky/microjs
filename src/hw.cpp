@@ -1612,6 +1612,51 @@ JS_NATIVE(g_pinMode) { (void)self; pinMode(IA(0), IA(1)); return Value(); }
 JS_NATIVE(g_digitalWrite) { (void)self; digitalWrite(IA(0), I.truthy(JS_ARG(1)) ? HIGH : LOW); return Value(); }
 JS_NATIVE(g_digitalRead) { (void)self; return Value::num(digitalRead(IA(0))); }
 JS_NATIVE(g_analogRead) { (void)self; return Value::num(analogRead(IA(0))); }
+// neopixel(pin, colors, [order]): sends colors (an array of 0xRRGGBB, one per LED, up to 512) to a
+// WS2812 strip on a GPIO, with the RMT peripheral. order is the strip's byte order, "GRB" (the
+// default) or "RGB". Returns true when it was sent. ESP32 only (false on an RP2350 board).
+JS_NATIVE(g_neopixel) {
+  (void)self;
+#if !MICROJS_RP2
+  static rmt_obj_t* rmt = nullptr;
+  static int rmtPin = -1;
+  static rmt_data_t* items = nullptr;
+  static size_t itemsCap = 0;
+  int pin = IA(0);
+  std::vector<Value> colors = I.toList(JS_ARG(1));
+  size_t n = std::min<size_t>(colors.size(), 512);
+  bool rgb = JS_ARG(2).isStr() && I.toStr(JS_ARG(2)) == "RGB";
+  if (pin < 0 || n == 0) return Value::boolean(false);
+  if (!rmt || rmtPin != pin) {
+    if (rmt) rmtDeinit(rmt);
+    rmt = rmtInit(pin, RMT_TX_MODE, RMT_MEM_64);
+    rmtPin = rmt ? pin : -1;
+    if (!rmt) return Value::boolean(false);
+    rmtSetTick(rmt, 100);  // 100 ns per unit
+  }
+  if (itemsCap < n * 24) {
+    free(items);
+    items = (rmt_data_t*)malloc(n * 24 * sizeof(rmt_data_t));
+    itemsCap = items ? n * 24 : 0;
+    if (!items) return Value::boolean(false);
+  }
+  size_t k = 0;
+  for (size_t i = 0; i < n; i++) {
+    uint32_t c = (uint32_t)I.toInt32(colors[i]);
+    uint32_t r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    uint32_t word = rgb ? (r << 16 | g << 8 | b) : (g << 16 | r << 8 | b);
+    for (int bit = 23; bit >= 0; bit--, k++) {
+      bool one = (word >> bit) & 1;
+      items[k].level0 = 1; items[k].duration0 = one ? 8 : 4;  // 0.8 / 0.4 us high
+      items[k].level1 = 0; items[k].duration1 = one ? 4 : 8;  // 0.4 / 0.8 us low
+    }
+  }
+  return Value::boolean(rmtWriteBlocking(rmt, items, k));
+#else
+  (void)I; (void)args; (void)argc;
+  return Value::boolean(false);
+#endif
+}
 JS_NATIVE(g_micros) { (void)I; (void)self; (void)args; (void)argc; return Value::num((double)micros()); }
 JS_NATIVE(g_delay) {
   (void)self;
@@ -3217,7 +3262,7 @@ static const NativeEntry LAZY_lcd[] = {{"setRotation", lcd_setRotation}, {"getRo
 static const NativeEntry LAZY_touch[] = {{"read", touch_read}, {"raw", touch_raw}, {"calibrate", touch_calibrate}, {"on", touch_on}, {"off", touch_off}, {nullptr, nullptr}};
 static const NativeEntry LAZY_sys[] = {{"heap", sys_heap}, {"restart", sys_restart}, {"battery", sys_battery}, {"cpuMhz", sys_cpuMhz}, {"firmwareInfo", sys_firmwareInfo}, {"i2cScan", sys_i2cScan}, {"i2cWrite", sys_i2cWrite}, {"i2cRead", sys_i2cRead}, {"installFirmware", sys_installFirmware}, {nullptr, nullptr}};
 static const NativeEntry LAZY_fsObj[] = {{"read", fs_read}, {"write", fs_write}, {"append", fs_append}, {"remove", fs_remove}, {"exists", fs_exists}, {"list", fs_list}, {"dir", fs_dir}, {"contains", fs_contains}, {"writeBase64", fs_writeBase64}, {"readBase64", fs_readBase64}, {"stat", fs_stat}, {"mkdir", fs_mkdir}, {"rmdir", fs_rmdir}, {"rename", fs_rename}, {"copy", fs_copy}, {"space", fs_space}, {nullptr, nullptr}};
-static const NativeEntry LAZY_GLOBALS[] = {{"led", g_led}, {"backlight", g_backlight}, {"tone", g_tone}, {"noTone", g_noTone}, {"light", g_light}, {"pinMode", g_pinMode}, {"digitalWrite", g_digitalWrite}, {"digitalRead", g_digitalRead}, {"analogRead", g_analogRead}, {"delay", g_delay}, {"micros", g_micros}, {"localTime", g_localTime}, {"readConfig", g_readConfig}, {nullptr, nullptr}};
+static const NativeEntry LAZY_GLOBALS[] = {{"led", g_led}, {"backlight", g_backlight}, {"tone", g_tone}, {"noTone", g_noTone}, {"light", g_light}, {"pinMode", g_pinMode}, {"digitalWrite", g_digitalWrite}, {"digitalRead", g_digitalRead}, {"analogRead", g_analogRead}, {"neopixel", g_neopixel}, {"delay", g_delay}, {"micros", g_micros}, {"localTime", g_localTime}, {"readConfig", g_readConfig}, {nullptr, nullptr}};
 #if JS_WIFI
 // ---- web: a small HTTP server for apps (web.js). Requests are answered from hwPoll, in the app's
 // own event loop, so a handler can draw and beep like any other event handler.

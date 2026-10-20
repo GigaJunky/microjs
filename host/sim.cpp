@@ -432,6 +432,7 @@ NOP(g_tone)
 NOP(g_noTone)
 NOP(g_pinMode)
 NOP(g_digitalWrite)
+JS_NATIVE(g_neopixel) { (void)I; (void)self; (void)args; (void)argc; return Value::boolean(true); }
 JS_NATIVE(g_zero) { (void)I; (void)self; (void)args; (void)argc; return Value::num(0); }
 JS_NATIVE(g_light) { (void)I; (void)self; (void)args; (void)argc; return Value::num(1234); }
 JS_NATIVE(g_delay) {
@@ -918,7 +919,7 @@ void simInstall(Interp& I, const std::string& root) {
 
   struct { const char* n; NativeFn f; } globals[] = {
     {"led", g_led}, {"backlight", g_backlight}, {"tone", g_tone}, {"noTone", g_noTone}, {"light", g_light},
-    {"pinMode", g_pinMode}, {"digitalWrite", g_digitalWrite}, {"digitalRead", g_zero}, {"analogRead", g_zero},
+    {"pinMode", g_pinMode}, {"digitalWrite", g_digitalWrite}, {"digitalRead", g_zero}, {"analogRead", g_zero}, {"neopixel", g_neopixel},
     {"delay", g_delay}, {"micros", g_micros}, {"localTime", g_localTime}, {"readConfig", g_readConfig}};
   for (auto& g : globals) I.setGlobal(g.n, Value::obj(I.newNative(g.f, g.n)));
   I.setGlobal("launch", Value::obj(I.newNative(g_launch, "launch")));

@@ -56,7 +56,7 @@ setInterval(() => led(0, Math.random() * 40, 0), 200);
 |---|---|---|
 | `cyd` | ESP32-2432S028R "Cheap Yellow Display" (one USB port) | tested; limited: no PSRAM, so the big and WiFi apps may run out of memory |
 | `cyd2usb` | CYD variant with two USB ports (ST7789 panel) | builds; same board otherwise |
-| `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery |
+| `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812 RGB LED on GPIO 42, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery |
 | `cardputer-adv` | M5Stack Cardputer ADV: ESP32-S3, 240×135 ST7789, 56-key keyboard, ES8311 audio, battery, no touch, no PSRAM | tested: display, keyboard, sound, LED, SD |
 | `coco-vga` | [ESP32-CoCo](https://github.com/mast4rbug/ESP32-CoCo) board: ESP32-S3, VGA output, USB keyboards and gamepads, SD, PWM sound | tested (see "The ESP32-CoCo VGA board") |
 | `rp2350-pizero` | Waveshare RP2350-PiZero: RP2350B (520 KB RAM, 16 MB flash), mini HDMI out, USB keyboards and gamepads (hubs work), microSD, PWM sound on a header pin; **no WiFi or Bluetooth** | tested: HDMI, USB keyboard and gamepad, SD, flash, network and clock through the computer (see "The RP2350-PiZero") |
@@ -116,12 +116,15 @@ and if so bumps the last number (1.0.0 → 1.0.1). Building several boards bumps
 release set it yourself (1.1.0, or 2.0.0 when scripts would break); later changes count up from
 there. `tools/version-state.json` remembers the last fingerprint - keep it with the code.
 
-**Without PlatformIO:** ready-made images for every board are on the releases page (built with
-`tools/build_release.sh`). Flash one at address 0 with
-[esptool-js](https://espressif.github.io/esptool-js/) in Chrome or Edge: `micro-js-<version>-<board>-full.bin` has
-the firmware and the apps, `-app.bin` only the firmware (keeps the apps on the board). The
-RP2350-PiZero takes `.uf2` files instead: hold its BOOT button while plugging it into a computer,
-and drag `micro-js-<version>-rp2350-pizero-full.uf2` (or `-app.uf2`) onto the drive that appears.
+**Without PlatformIO:** ready-made files are on the releases page (built with
+`tools/build_release.sh`): one firmware image per board, `micro-js-<version>-<board>-firmware.bin`,
+and one `micro-js-<version>-apps.zip` with the apps for every board. Flash the firmware at address 0
+with [esptool-js](https://espressif.github.io/esptool-js/) in Chrome or Edge (it keeps the apps and
+settings already on the board). Then install the apps: drop the zip on the web IDE's file list
+(`node tools/serve.js`), or run `node tools/upload.js /dev/ttyACM0 micro-js-<version>-apps.zip`; a
+`micro-js.json` already on the board is kept. The RP2350-PiZero takes `.uf2` files instead: hold its
+BOOT button while plugging it into a computer, and drag `micro-js-<version>-rp2350-pizero-firmware.uf2`
+onto the drive that appears.
 
 ## Using it
 
@@ -178,6 +181,7 @@ npm install                                                   # once: gets the s
 node tools/upload.js /dev/ttyUSB0 myapp.js --run              # upload + run, streams output
 node tools/upload.js /dev/ttyUSB0 myapp.js --as main.js       # make it the boot script
 node tools/upload.js /dev/ttyACM0 song.mp3 photo.jpg --to /sd/media   # any file, any folder
+node tools/upload.js /dev/ttyACM0 micro-js-1.1.74-apps.zip           # install a release's apps (or a folder: data/); the board's micro-js.json is kept
 ```
 
 (The port is `COM5` or similar on Windows.) Files go to the board's flash unless `--to` names a
@@ -279,6 +283,7 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
 | `light()` | light sensor, raw 0–4095 |
 | `pinMode(pin, INPUT \| OUTPUT \| INPUT_PULLUP \| INPUT_PULLDOWN)` | for the free GPIOs on the expansion connectors (e.g. 22, 27, 35) |
 | `digitalWrite(pin, v)`, `digitalRead(pin)`, `analogRead(pin)` | |
+| `neopixel(pin, colors, [order])` | sends an array of `0xRRGGBB` numbers (one per LED, up to 512) to a WS2812 strip on a GPIO using the RMT peripheral; `order` is `"GRB"` (default) or `"RGB"`; returns `true` when sent. ESP32 only. On the CYD-S3 the built-in RGB LED is a WS2812 on GPIO 42, so `neopixel(42, [0x300000])` lights it red (`neopix.js` with GPIO 42 and 1 LED tests the call with no wiring; `led()` still works too). For a strip use GPIO 2 on its header (tested); GPIO 1, 4-8 belong to the audio codec (a strip on GPIO 6 sticks at white), 10-13 and 45-46 to the display, 15, 16 and 18 to touch |
 | `millis()`, `micros()` | |
 | `delay(ms)` | blocking, but Ctrl-C still works; prefer timers |
 | `sys.heap()` | `{free, minFree, largest, js}` |
@@ -435,6 +440,7 @@ To save about 600 KB of flash, set `-DJS_WIFI=0` in `platformio.ini`.
 | `controls.js` | the LED colour mixer (red / green / blue / brightness / cycle-speed sliders, auto colour cycling, a swatch matching the LED), backlight and beep |
 | `remote.js` | a web remote: open the address it shows on a phone or computer for the LED mixer, a beep button and a chat with the board (the page is `remote.html`). If it can't join your WiFi it makes its own network (`micro-js-xxxx`, or `"ap": {"ssid", "pass"}` in `micro-js.json`) and phones that join get the page by themselves |
 | `demo.js` | a demoscene show - plasma, starfield, a shaded cube, copper bars and a scroller - to an original chiptune (tap / Space: next effect, `m`: music) |
+| `neopix.js` | drives a WS2812 / NeoPixel strip or matrix from a GPIO (CYD: CN1, GPIO 27 or 22): pick the pin, LED count, grid columns, wiring (zigzag or not), pattern (rainbow, chase, scanner, fire, plasma, ripple, rain...), colour, speed and brightness, with a live preview. ESP32 only; tested on the classic CYD |
 | `life.js` | Conway's Game of Life, redrawing only cells that change |
 | `fetch.js` | fetches weather + stocks (+ news) and writes them to small cache files, then launches `weather.js`. The one app that uses WiFi. See "The weather dashboard" below |
 | `weather.js` | the dashboard display: now / hourly / 5 days / stocks / news (°C and °F). Reads the cache files `fetch.js` wrote - no WiFi - so it stays light. Tap left/right (or `,` `/`) to change page; pages rotate every 30 s |

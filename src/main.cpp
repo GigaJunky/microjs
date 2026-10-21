@@ -54,9 +54,15 @@ static void onNewFailure() {
 }
 
 // REPL output goes to the serial port and, on boards with a keyboard, to the on-screen console
+// Quiet mode (Ctrl-E on, Ctrl-F or Ctrl-C off, or 3 s without input): tools/upload.js and the web IDE
+// switch it on for an upload. The REPL then neither echoes the lines it receives nor shows a prompt, and
+// stays off the on-screen console (drawing every typed character there made uploads slow); output a
+// script prints still goes to the serial port.
+static bool quiet = false;
+static uint32_t quietAt = 0;
 static void term(const char* s, size_t n) {
   replSerial.write((const uint8_t*)s, n);
-  hwConsoleWrite(s, n);
+  if (!quiet) hwConsoleWrite(s, n);
 }
 // Lines starting with STX (0x02) come from tools/bridge.js (network and clock through the computer,
 // MICROJS_BRIDGE): they go to hwBridgeLine(), never to the REPL. true = the byte was one of theirs.
@@ -102,7 +108,7 @@ void hwConsoleKey(const char* key, uint8_t mods) {
 }
 
 static void prompt() {
-  if (!saving) out(code.empty() ? "> " : "... ");
+  if (!saving && !quiet) out(code.empty() ? "> " : "... ");
 }
 
 static void newInterp() {
@@ -285,7 +291,11 @@ static void pollRepl() {
   static bool lastCR = false;
   static int esc = 0;
   int c;
+  if (quiet && millis() - quietAt > 3000) { quiet = false; prompt(); }  // the uploader went away
   while ((c = readByte()) >= 0) {
+    if (quiet) quietAt = millis();
+    if (c == 5) { quiet = true; quietAt = millis(); line.clear(); continue; }  // Ctrl-E: quiet mode on
+    if (c == 6) { quiet = false; prompt(); continue; }  // Ctrl-F: off
     if (esc) {  // ANSI escape sequence: ESC [ X
       if (esc == 1) { esc = c == '[' ? 2 : 0; continue; }
       esc = 0;
@@ -299,6 +309,7 @@ static void pollRepl() {
     }
     if (c == 27) { esc = 1; continue; }
     if (c == 3) {
+      quiet = false;
       out("^C\n");
       line.clear();
       code.clear();
@@ -324,7 +335,7 @@ static void pollRepl() {
     if (c == '\n' && lastCR) { lastCR = false; continue; }
     lastCR = c == '\r';
     if (c == '\r' || c == '\n') {
-      if (!saving) out("\r\n");
+      if (!saving && !quiet) out("\r\n");
       std::string ln;
       ln.swap(line);
       if (!ln.empty() && !saving) lastLine = ln;
@@ -340,7 +351,7 @@ static void pollRepl() {
       continue;
     }
     line += (char)c;
-    if (!saving) { char ch = (char)c; term(&ch, 1); }
+    if (!saving && !quiet) { char ch = (char)c; term(&ch, 1); }
   }
 }
 

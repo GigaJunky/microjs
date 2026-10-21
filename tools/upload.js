@@ -133,6 +133,8 @@ await write("\x03");  // Ctrl-C: stop whatever is running
 await sleep(300);
 await write("\r\n");
 await sleep(200);
+await write("\x05\r\n");  // quiet mode: the board stops echoing every line (and drawing it on its screen)
+await sleep(100);
 try {
   const v = await call("sys.version || ''");
   if (!v) console.warn("note: this board's firmware is older than this tool expects - flash a current release");
@@ -158,12 +160,14 @@ try {
     await upload(f, last);
   }
   if (opt.run && last) {
+    await write("\x06");
     console.log(`running ${last} - its output follows (Ctrl+C to stop)`);
     streaming = true;
     await write(`launch(${q(last)})\r\n`);
     process.on("SIGINT", async () => { await write("\x03"); port.close(() => process.exit(0)); });
-  } else port.close();
+  } else { await write("\x06"); port.close(); }
 } catch (e) {
   console.error("\n" + e.message);
+  try { await write("\x06"); } catch (x) {}
   port.close(() => process.exit(1));
 }

@@ -519,6 +519,12 @@ async function uploadZip(f) {
   log(`installed ${files.length} files from ${f.name} into ${cwd}`, "sys");
 }
 async function uploadFiles(files) {
+  await send("\x05\r\n").catch(() => {});  // quiet mode: the board stops echoing every line and drawing it on its screen
+  try { await uploadEach(files); } finally { await send("\x06").catch(() => {}); }
+  await listDir(cwd);
+  refreshInfo();
+}
+async function uploadEach(files) {
   for (const f of files) {
     try {
       if (/\.zip$/i.test(f.name)) { await uploadZip(f); continue; }
@@ -530,8 +536,6 @@ async function uploadFiles(files) {
       log(`uploaded ${path} (${human(bytes.length)})`, "sys");
     } catch (e) { busy(null); log("upload: " + e.message, "err"); }
   }
-  await listDir(cwd);
-  refreshInfo();
 }
 
 // ---------------------------------------------------------------- busy indicator

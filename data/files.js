@@ -1,13 +1,11 @@
-// File manager: browse the board's flash and the SD card; run, edit, view, play, copy, move,
-// rename and delete files, and make folders.
-// Keys: up / down move, Enter or right opens (a file opens its menu), Backspace or left goes up,
-// m menu for the selection (folders too), c copy, x cut, v paste, Delete deletes, r rename,
-// n new folder, Escape back to the launcher.
-// Touch: tap a folder to open it, tap a file for its menu, swipe up / down to scroll; the buttons
-// along the bottom (Menu also works on folders).
-// Pictures (.jpg .png .bmp) open full screen: left / right (or tap the sides, or swipe) for the
-// previous / next one in the folder, r (or tap the top strip) turns it 90 degrees, Enter / Escape
-// (or tap the middle) to go back.
+// File manager: browse the board's flash and the SD card; run, edit, view, play, copy, move, rename and
+// delete files, and make folders.
+// Keys: up / down move, Enter or right opens (a file opens its menu), Backspace or left goes up, m menu,
+// c copy, x cut, v paste, Delete deletes, r rename, n new folder, f filters by type (Flash: firmware files), s stops music, Escape
+// back to the launcher. Touch: tap to open, long press for the menu, swipe to scroll, buttons along the bottom.
+// Pictures (.jpg .png .bmp) open full screen: left / right (or tap the sides, or swipe) for the previous / next
+// one, r turns it 90 degrees, Enter / Escape (or tap the middle) to go back. Videos (.avi) play full screen:
+// Space or a tap pauses, Enter or a long press stops. A .FLH / .bin on the SD card offers "Install firmware...".
 // Renaming needs a keyboard; on touch-only boards new folders get numbered names.
 // @needs-more-memory (big for an original ESP32 without PSRAM: the CYD's launcher hides it at first)
 const W = lcd.width(), H = lcd.height(), SMALL = H < 200, F = SMALL ? 1 : 2;
@@ -17,6 +15,8 @@ const LH = TOUCH ? 30 : TH, BAR = TOUCH ? 36 : board.hasTouch ? 16 : SMALL ? 10 
 const ROWS = Math.floor((H - TOP - BAR) / LH), CHW = F === 1 ? 6 : 8, TY = Math.floor((LH - TH) / 2) + 1;
 const BG = lcd.BLACK, PANEL = lcd.color(20, 24, 48), SEL = lcd.color(30, 70, 120), DIR = lcd.color(255, 200, 80);
 const PICS = [".jpg", ".jpeg", ".png", ".bmp"];
+const FILTERS = [["All", null], ["Music", [".mp3"]], ["Video", [".avi"]], ["Pics", PICS], ["Apps", [".js"]], ["Flash", [".flh", ".efw", ".bin"]]];  // f / the Type button: show only these files (folders always)
+let filter = 0;
 const TEXT = [".txt", ".json", ".conf", ".cfg", ".csv", ".md", ".log", ".ini", ".hi", ".js", ".htm", ".html", ".xml", ".bas"];
 keyboard.capture(true);  // Escape and Ctrl+C come here (the rename prompt needs them)
 
@@ -38,15 +38,16 @@ function size(b) {
 const label = (p) => (p === "" ? "Storage" : p.startsWith("/sd") ? "SD:" + (p.slice(3) || "/") : "Flash:" + p);
 function say(t) { msg = t; draw(); setTimeout(() => { if (msg === t) { msg = ""; draw(); } }, 2500); }
 
-function load(p, keep) {
+function loadDir(p, keep) {
   path = p;
   if (p === "") {  // the two drives
     const f = fs.space("/"), s = fs.space("/sd");
     items = [{ name: "Flash", dir: true, size: 0, to: "/", info: `${size(f.total - f.used)} free of ${size(f.total)}` }];
     // (used is -1 where it takes too long to work out - the RP2350 reads a whole FAT for it)
-    if (s.total) items.push({ name: "SD card", dir: true, size: 0, to: "/sd", info: s.used < 0 ? size(s.total) : `${size(s.total - s.used)} free of ${size(s.total)}` });
+    if (s.total && s.total !== f.total) items.push({ name: "SD card", dir: true, size: 0, to: "/sd", info: s.used < 0 ? size(s.total) : `${size(s.total - s.used)} free of ${size(s.total)}` });
   } else {
-    items = fs.dir(p).sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
+    const want = FILTERS[filter][1];
+    items = fs.dir(p).filter((e) => e.dir || !want || want.includes(ext(e.name))).sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
     items.unshift({ name: "..", dir: true, up: true });
   }
   if (!keep) sel = top = 0;
@@ -63,7 +64,7 @@ function header(t, right) {
   lcd.drawString(fit(t, W - 8 - (right ? right.length * CHW + 8 : 0)), 4, 2, F);
   if (right) { lcd.setTextDatum(lcd.TR); lcd.setTextColor(lcd.LIGHTGREY); lcd.drawString(right, W - 4, 2, F); lcd.setTextDatum(lcd.TL); }
 }
-const BUTTONS = [["Up", "up"], ["New", "new"], ["Paste", "paste"], ["Menu", "menu"]];
+const BUTTONS = [["Up", "up"], ["New", "new"], ["Paste", "paste"], ["Type", "filter"], ["Menu", "menu"]];
 function footer() {
   const y = H - BAR;
   lcd.fillRect(0, y, W, BAR, PANEL);
@@ -71,7 +72,7 @@ function footer() {
   if (msg) { lcd.setTextColor(lcd.YELLOW); lcd.drawString(fit(msg, W - 8), 4, y + BAR / 2, 1); lcd.setTextDatum(lcd.TL); return; }
   if (!board.hasTouch) {
     lcd.setTextColor(lcd.DARKGREY);
-    lcd.drawString(clip ? `${clip.cut ? "cut" : "copied"}: ${clip.name} - v pastes` : "Enter open  m menu  c/x/v  Del  r  n", 4, y + BAR / 2, 1);
+    lcd.drawString(clip ? `${clip.cut ? "cut" : "copied"}: ${clip.name} - v pastes` : "Enter open  m menu  c/x/v  Del  r  n  f type", 4, y + BAR / 2, 1);
     lcd.setTextDatum(lcd.TL);
     return;
   }
@@ -81,12 +82,12 @@ function footer() {
     const off = (a === "paste" && !clip) || ((a === "new" || a === "paste") && path === "");
     lcd.fillRoundRect(i * bw + 2, y + 2, bw - 4, BAR - 4, 5, off ? lcd.color(30, 30, 40) : lcd.color(45, 50, 90));
     lcd.setTextColor(off ? lcd.DARKGREY : lcd.WHITE);
-    lcd.drawString(t, i * bw + bw / 2, y + BAR / 2 + 1, F);
+    lcd.drawString(a === "filter" ? FILTERS[filter][0] : t, i * bw + bw / 2, y + BAR / 2 + 1, F);
   });
   lcd.setTextDatum(lcd.TL);
 }
 function drawList() {
-  header(label(path), items.length > ROWS ? `${sel + 1}/${items.length}` : "");
+  header(label(path), (filter && path !== "" ? FILTERS[filter][0] + " " : "") + (items.length > ROWS ? `${sel + 1}/${items.length}` : ""));
   lcd.fillRect(0, TOP - 2, W, H - TOP + 2 - BAR, BG);
   if (sel < top) top = sel;
   if (sel >= top + ROWS) top = sel - ROWS + 1;
@@ -150,6 +151,7 @@ function drawPrompt() {
 }
 function draw() {
   if (mode === "view") return drawView();
+  if (mode === "fw") return drawFw();
   drawList();
   if (mode === "menu") drawMenu();
   if (mode === "prompt") drawPrompt();
@@ -158,9 +160,9 @@ function draw() {
 // ---- actions
 function open(it) {
   if (!it) return;
-  if (it.dir) return load(target(it));
+  if (it.dir) return loadDir(target(it));
   if (PICS.includes(ext(it.name))) return showPicture(it);
-  if (ext(it.name) === ".avi") return launch("/video.js", target(it));
+  if (ext(it.name) === ".avi") return playVideo(target(it));
   showMenu(it);
 }
 function showMenu(it) {
@@ -169,10 +171,9 @@ function showMenu(it) {
   if (!it.dir) {
     if (e === ".js") list.push(["Run", () => launch(p)]);
     if (e === ".mp3" && board.hasMusic) list.push(["Play", () => { const err = audio.play(p); say(err || "Playing " + it.name + " - s stops"); }]);
-    if (e === ".mp3" && board.hasMusic && fs.exists("/mp3.js")) list.push(["Open in MP3 player", () => launch("/mp3.js", p)]);
-    if ((e === ".flh" || e === ".bin") && p.startsWith("/sd")) list.push(["Install firmware...", () => confirm("Open the firmware installer?", "open", () => launch("/flash.js"))]);
+    if ((e === ".flh" || e === ".efw" || e === ".bin") && p.startsWith("/sd") && (!board.chip || board.chip.startsWith("esp32"))) list.push(["Install firmware...", () => { load("/lib/fwinstall.js"); firmware(p, it); }]);  // (lib/fwinstall.js: the check / install screens, loaded only now)
     if (PICS.includes(e)) list.push(["View picture", () => showPicture(it)]);
-    else if (e === ".avi") list.push(["Play video", () => launch("/video.js", p)]);
+    else if (e === ".avi") list.push(["Play video", () => playVideo(p)]);
     else if (TEXT.includes(e) || it.size < 4096) list.push(["View", () => viewFile(p, it)]);
     if (board.hasKeyboard && (TEXT.includes(e) || !e)) list.push(["Edit", () => launch("/edit.js", p)]);
   }
@@ -194,7 +195,7 @@ function confirm(title, yes, fn) {
 function confirmDelete(it, p) {
   confirm(`Delete ${it.name}${it.dir ? " and all in it" : ""}?`, "delete", () => {
     const ok = it.dir ? removeTree(p) : fs.remove(p);
-    load(path, true);
+    loadDir(path, true);
     say(ok ? "Deleted " + it.name : "Couldn't delete " + it.name);
   });
 }
@@ -226,7 +227,7 @@ function doPaste() {
   if (ok && clip.cut && !sameDrive) ok = fs.stat(clip.from).dir ? removeTree(clip.from) : fs.remove(clip.from);
   const name = clip.name, cut = clip.cut;
   if (cut) clip = null;
-  load(path, true);
+  loadDir(path, true);
   say(ok ? (cut ? "Moved " : "Copied ") + name : "Failed - is there room?");
 }
 function rename(p, n) {
@@ -234,11 +235,11 @@ function rename(p, n) {
   const to = join(parent(p) || "/", n);
   if (fs.exists(to)) return say(n + " already exists");
   say(fs.rename(p, to) ? "Renamed to " + n : "Couldn't rename");
-  load(path, true);
+  loadDir(path, true);
 }
 function newFolder() {
   if (path === "") return;
-  const make = (n) => say(fs.mkdir(join(path, n)) ? "Made " + n : "Couldn't make " + n) || load(path, true);
+  const make = (n) => say(fs.mkdir(join(path, n)) ? "Made " + n : "Couldn't make " + n) || loadDir(path, true);
   if (board.hasKeyboard) return ask("New folder name:", "", (n) => (n && !n.includes("/") ? make(n) : say("Not a valid name")));
   let n = 1;
   while (fs.exists(join(path, "folder" + n))) n++;
@@ -296,6 +297,8 @@ function stepPicture(d) {
   sel = items.indexOf(pic.list[pic.i]);  // the list follows, for when you go back
   drawPicture();
 }
+// ---- video: lib/videoplay.js (loaded with the first video) plays it full screen: a tap pauses, holding stops
+function playVideo(p) { load("/lib/videoplay.js"); startVideo(p); }
 function ask(title, text, done) { prompt = { title, text, done }; mode = "prompt"; draw(); }
 function act(i) {
   const f = menu.items[i][1];
@@ -307,6 +310,16 @@ function act(i) {
 
 // ---- input
 function key(k) {
+  if (mode === "video") {
+    if (k === " ") pauseVideo();
+    else if (k === "Enter" || k === "Escape" || k === "Backspace") video.stop();
+    return;
+  }
+  if (mode === "fw") {
+    if ((k === "y" || k === "Y") && fw.info.ok) installFw();
+    else if (k === "n" || k === "N" || k === "Escape") { fw = null; mode = "list"; draw(); }
+    return;
+  }
   if (mode === "prompt") {
     if (k === "Enter") { const p = prompt; prompt = null; mode = "list"; draw(); p.done(p.text.trim()); }
     else if (k === "Escape") { prompt = null; mode = "list"; draw(); }
@@ -343,7 +356,7 @@ function key(k) {
   else if (k === "PageDown") { sel = Math.min(items.length - 1, sel + ROWS); draw(); }
   else if (k === "PageUp") { sel = Math.max(0, sel - ROWS); draw(); }
   else if (k === "Enter" || k === "ArrowRight" || k === "/") open(it);
-  else if (k === "Backspace" || k === "ArrowLeft" || k === ",") { if (path !== "") load(parent(path)); }
+  else if (k === "Backspace" || k === "ArrowLeft" || k === ",") { if (path !== "") loadDir(parent(path)); }
   else if (k === "Escape") { audio.stop(); launch("/main.js"); }
   else if (k === "m" || k === " ") showMenu(it);
   else if (k === "c" && it && !it.up && !it.to) { clip = { from: target(it), name: it.name, dir: it.dir, cut: false }; say("Copied " + it.name); }
@@ -352,6 +365,7 @@ function key(k) {
   else if ((k === "Delete" || k === "d") && it && !it.up && !it.to) confirmDelete(it, target(it));
   else if (k === "r" && it && !it.up && !it.to) ask("Rename to:", it.name, (n) => rename(target(it), n));
   else if (k === "n") newFolder();
+  else if (k === "f") { filter = (filter + 1) % FILTERS.length; loadDir(path, true); }
   else if (k === "s") { audio.stop(); say("Stopped"); }
 }
 keyboard.on("key", ({ key: k }) => key(k));
@@ -389,6 +403,8 @@ touch.on("up", () => {
   }
   if (!p || p.moved) return;
   const { x, y } = p, long = millis() - p.at > 500;
+  if (mode === "video") return long ? video.stop() : pauseVideo();
+  if (mode === "fw") return key(y > H - TH - 14 ? (x < W / 2 ? "y" : "n") : "");
   if (mode === "pic") {
     const pw = lcd.width(), ph = lcd.height();
     if (y < ph / 5) return turnPicture();
@@ -407,9 +423,10 @@ touch.on("up", () => {
   if (mode !== "list") return;
   if (y >= H - BAR) {
     const a = BUTTONS[Math.min(BUTTONS.length - 1, Math.floor(x / (W / BUTTONS.length)))][1];
-    if (a === "up") { if (path !== "") load(parent(path)); else launch("/main.js"); }
+    if (a === "up") { if (path !== "") loadDir(parent(path)); else launch("/main.js"); }
     else if (a === "new") newFolder();
     else if (a === "paste") paste();
+    else if (a === "filter") { filter = (filter + 1) % FILTERS.length; loadDir(path, true); }
     else if (a === "menu") showMenu(items[sel]);
     return;
   }
@@ -421,5 +438,8 @@ touch.on("up", () => {
   else open(items[i]);
 });
 
+// started with "flash" (the launcher's flash entry): the SD card, showing only firmware files
+const card = fs.space("/sd").total > 0 && fs.space("/sd").total !== fs.space("/").total;  // (no card: /sd answers with the flash's size)
+if (typeof ARG === "string" && ARG === "flash") filter = FILTERS.length - 1;
 lcd.fillScreen(BG);
-load(fs.space("/sd").total ? "" : "/");
+loadDir(filter && card ? "/sd" : card ? "" : "/");

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Convert videos (.mp4 .mkv .mov .webm ... anything ffmpeg reads) into .avi files that video.js
+# Convert videos (.mp4 .mkv .mov .webm ... anything ffmpeg reads) into .avi files that the file manager (files.js)
 # plays: Motion-JPEG video sized for the board's screen, with MP3 sound.
 #
 #   tools/convert-videos.sh [options] FILE_OR_FOLDER...

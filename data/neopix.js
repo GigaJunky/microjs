@@ -7,6 +7,7 @@
 // Wire the strip's data line to the pin through ~330 ohm, 5 V power and ground from the board's
 // 5 V / GND pins (CN1 only has 3.3 V: power a long strip from its own supply, common ground).
 // @needs-esp32 (the NeoPixel output uses the ESP32's RMT peripheral)
+if (board.name.startsWith("ESP32-S3 VGA")) throw new Error("NeoPixel: this board has no free GPIO pins (they carry the VGA picture)");
 const W = lcd.width(), H = lcd.height(), SMALL = H < 200, F = SMALL ? 1 : 2;
 const TOP = SMALL ? 14 : 24, BOT = SMALL ? 22 : 40, CFG = "/neopix.json";
 const KEYS = { ";": "up", ".": "down", ",": "left", "/": "right", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "enter" };

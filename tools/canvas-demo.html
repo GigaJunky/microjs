@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>micro-js canvas demo in a browser</title>
+<style>
+  body { background: #111; color: #ccc; font: 14px system-ui, sans-serif; margin: 16px; }
+  canvas { display: block; width: 640px; max-width: 100%; image-rendering: pixelated; border: 1px solid #444; margin-top: 10px; cursor: pointer; }
+  code { background: #222; padding: 1px 4px; border-radius: 3px; }
+</style></head><body>
+<p>This runs <code>data/canvasdemo.js</code> exactly as it is on the board, using this page's own <code>&lt;canvas&gt;</code>
+(click to change the colour). The page only supplies what a board has and a browser doesn't: <code>load</code>, <code>touch</code>,
+<code>keyboard</code> and <code>millis</code>.</p>
+<canvas id="canvas" width="320" height="240"></canvas>
+<script>
+function load() {}  // lib/canvas.js: a browser already has the canvas and requestAnimationFrame
+const touch = { on(ev, fn) {
+  if (ev !== "down") return;
+  canvas.addEventListener("pointerdown", (e) => { const r = canvas.getBoundingClientRect(); fn({ x: ((e.clientX - r.left) * canvas.width) / r.width, y: ((e.clientY - r.top) * canvas.height) / r.height }); });
+} };
+const keyboard = { on(ev, fn) { if (ev === "key") addEventListener("keydown", (e) => fn({ key: e.key })); } };
+const millis = () => performance.now();
+</script>
+<script src="../data/canvasdemo.js"></script>
+</body></html>

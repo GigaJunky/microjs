@@ -20,3 +20,4 @@ void simKeyNow(bool down, const std::string& key);
 void simQueueKey(uint32_t at, const std::string& key, uint32_t holdMs);  // --key  // keyboard event from the browser
 void simUseCardputer();  // 240x135 screen, keyboard, no touch (call before simInstall)  // launch() asks for a fresh interpreter (like the board)
 std::string simTakeLaunch();    // the script launch() asked for, if any
+std::string simTakeLaunchArg();  // ...and the ARG it asked for (call after simTakeLaunch)

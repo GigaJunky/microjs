@@ -74,6 +74,6 @@ for env in $ENVS; do
     node "$ROOT/tools/make-flh.js" "$dir/firmware.bin" "$ROOT/release/MICROJS_${VERSION//./-}.FLH" \
       "micro-js $(sed -n 's/.*MICROJS_VERSION "\(.*\)".*/\1/p' "$ROOT/src/version.h") for the ESP32-CoCo board: JavaScript interpreter, REPL and app launcher on VGA,
 with USB keyboard and joystick. F12 or Escape: menu. Ctrl+C: console.
-To go back to the CoCo emulator, run flash.js and pick its .FLH file." | sed 's/^/   /'
+To go back to the CoCo emulator, open the file manager (files.js), pick its .FLH file on the SD card and choose Install firmware." | sed 's/^/   /'
   fi
 done

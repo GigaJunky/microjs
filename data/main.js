@@ -99,10 +99,13 @@ function openEditor() {
   launch(EDITOR, JSON.stringify(allScripts.map(({ name, path, sd, big }) => ({ name, path, sd, big }))));
 }
 
+// a "flash" entry (install firmware from the SD card) where there is a spare firmware slot: the S3 boards, not the classic ESP32 CYDs
+const CAN_FLASH = isEsp && board.chip && board.chip !== "esp32" && board.hasSd !== false && flashApps.includes("files.js");
 let scripts = [];
 function applyFilter() {
   const nHidden = allScripts.filter(isHidden).length;
   scripts = allScripts.filter((sc) => prefs.showHidden || !isHidden(sc)).map((sc) => ({ ...sc, hidden: isHidden(sc) }));
+  if (CAN_FLASH) scripts.push({ name: "flash", path: "/files.js", arg: "flash" });  // the file manager showing only firmware files
   if (nHidden) scripts.push({ name: prefs.showHidden ? "hide hidden apps" : `+ ${nHidden} hidden`, toggle: true });
   if (EDITOR) scripts.push({ name: "edit list", edit: true });
 }
@@ -217,7 +220,7 @@ function run(b) {
   if (b.edit) return openEditor();
   drawButton(b, true);
   tone(1500, 30);
-  launch(b.path);  // starts the script in a fresh interpreter once this handler returns
+  if (b.arg) launch(b.path, b.arg); else launch(b.path);  // starts the script in a fresh interpreter once this handler returns
 }
 
 const hit = (b, x, y) => x >= b.x && x < b.x + BW && y >= b.y && y < b.y + BH;
@@ -288,7 +291,7 @@ function runList(i) {
   if (scripts[i].toggle) return toggleHidden();
   if (scripts[i].edit) return openEditor();
   tone(1500, 30);
-  launch(scripts[i].path);
+  if (scripts[i].arg) launch(scripts[i].path, scripts[i].arg); else launch(scripts[i].path);
 }
 
 if (board.hasBattery)

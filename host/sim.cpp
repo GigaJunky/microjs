@@ -3,6 +3,7 @@
 // scripts can be run and checked without a board. Text uses the classic 5x7 font
 // scaled up as an approximation of the TFT_eSPI fonts.
 #include "sim.h"
+#include "../src/canvas2d.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -328,6 +329,32 @@ JS_NATIVE(lcd_drawImage) {  // same arguments and fitting as the boards (src/hw.
   I.setOwn(o, "h", Value::num(dh));
   return Value::obj(o);
 }
+// the canvas (src/canvas2d.h, the same code the boards run) draws through this
+struct SimGfx : cvs::Gfx {
+  Canvas* buf = nullptr;
+  Canvas* t() { return buf ? buf : screen; }
+  int width() override { return screen->w; }
+  int height() override { return screen->h; }
+  uint16_t color(int r, int g, int b) override { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3); }
+  void fillRect(int x, int y, int w, int h, uint16_t c) override { t()->fillRect(x, y, w, h, c); }
+  void drawRect(int x, int y, int w, int h, uint16_t c) override { fillRect(x, y, w, 1, c); fillRect(x, y + h - 1, w, 1, c); fillRect(x, y, 1, h, c); fillRect(x + w - 1, y, 1, h, c); }
+  void fillCircle(int x, int y, int r, uint16_t c) override { t()->ellipse(x, y, r, r, c, true); }
+  void drawCircle(int x, int y, int r, uint16_t c) override { t()->ellipse(x, y, r, r, c, false); }
+  void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) override { t()->triangle(x0, y0, x1, y1, x2, y2, c); }
+  void hline(int x, int y, int w, uint16_t c) override { t()->fillRect(x, y, w, 1, c); }
+  void line(int x0, int y0, int x1, int y1, uint16_t c) override { t()->line(x0, y0, x1, y1, c); }
+  void setText(uint16_t c, int datum) override { Canvas* k = t(); k->fg = c; k->bgfill = false; k->datum = datum; }
+  int drawText(const char* s, int x, int y, int font) override { return t()->text(s, x, y, font); }
+  int textWidth(const char* s, int font) override { return t()->textWidth(s, font); }
+  bool buffer(bool on) override {
+    if (!on) { delete buf; buf = nullptr; return true; }
+    if (!buf) buf = new Canvas(screen->w, screen->h);
+    return true;
+  }
+  void flush() override { if (buf) screen->px = buf->px; }
+};
+static SimGfx simGfx;
+
 JS_NATIVE(lcd_createSprite) {
   (void)self;
   int w = IA(0), h = IA(1);
@@ -712,10 +739,12 @@ JS_NATIVE(fs_copy) {
 JS_NATIVE(fs_space) {
   (void)self;
   std::error_code ec;
-  sfs::space_info si = sfs::space(fsPath(argc ? I.toStr(args[0]) : "/"), ec);
+  std::string a = argc ? I.toStr(args[0]) : "/";
+  sfs::space_info si = sfs::space(fsPath(a), ec);
+  bool card = a == "/sd" || a.rfind("/sd/", 0) == 0;  // the flash is small, as on a board (scripts check the two sizes differ to tell a card is in)
   Object* o = I.newObject();
-  I.setOwn(o, "total", Value::num(ec ? 0 : (double)si.capacity));
-  I.setOwn(o, "used", Value::num(ec ? 0 : (double)(si.capacity - si.available)));
+  I.setOwn(o, "total", Value::num(card ? (ec ? 0 : (double)si.capacity) : 917504));
+  I.setOwn(o, "used", Value::num(card ? (ec ? 0 : (double)(si.capacity - si.available)) : 348160));
   return Value::obj(o);
 }
 // The simulator's "WiFi" is the computer's network: http.get runs curl. With
@@ -793,16 +822,18 @@ JS_NATIVE(wifi_scan) {  // a few fake networks so WiFi tools can be tried in the
 }
 JS_NATIVE(http_fail) { (void)self; (void)args; (void)argc; I.throwError("Error", "http: WiFi is not connected (simulator)"); }
 
-std::string simLaunchPath;  // set by launch() in the browser simulator: restart with this script
+std::string simLaunchPath, simLaunchArg;  // set by launch() in the browser simulator: restart with this script (and ARG)
 bool simLaunchRestarts = false;
 JS_NATIVE(g_launch) {
   (void)self;
-  std::string path = I.toStr(JS_ARG(0));
+  std::string path = I.toStr(JS_ARG(0)), arg = argc > 1 ? I.toStr(args[1]) : "";  // (the board sets the global ARG from the second argument)
   if (!simLaunchRestarts) {  // command-line simulator: just run it here
     std::string src;
     if (!simReadFile(path, src)) I.throwError("Error", "cannot read file '" + path + "'");
+    if (!arg.empty()) I.setGlobal("ARG", I.str(arg));
     return I.run(src, path.c_str());
   }
+  simLaunchArg = arg;
   simLaunchPath = path;  // like the board: a fresh interpreter once this handler returns
   I.clearTimers();
   return Value();
@@ -999,6 +1030,7 @@ void simInstall(Interp& I, const std::string& root) {
   I.def(fsObj, "copy", fs_copy);
   I.def(fsObj, "space", fs_space);
   I.setGlobal("fs", Value::obj(fsObj));
+  cvs::install(I, &simGfx);  // the global `canvas`
   Object* wifi = I.newObject();
   I.def(wifi, "connect", wifi_true);
   I.def(wifi, "ntp", wifi_true);
@@ -1137,6 +1169,11 @@ void simKeyNow(bool down, const std::string& key) { keyQueue.push_back({0, down,
 void simUseCardputer() { cardputer = true; }
 
 void simUseRestartingLaunch() { simLaunchRestarts = true; }
+std::string simTakeLaunchArg() {
+  std::string a;
+  a.swap(simLaunchArg);
+  return a;
+}
 std::string simTakeLaunch() {
   std::string p;
   p.swap(simLaunchPath);

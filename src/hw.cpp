@@ -35,6 +35,7 @@
 #endif
 #include <Wire.h>  // touch / keyboard / codec, and sys.i2c*()
 #include "hw.h"
+#include "canvas2d.h"  // the browser-style canvas, drawn through TftGfx below
 #include "version.h"
 
 using namespace js;
@@ -1588,6 +1589,51 @@ JS_NATIVE(sprite_free) {
   return Value();
 }
 
+// The canvas (canvas2d.h) draws through this: the screen, or a full-screen sprite after canvas.buffer(true)
+struct TftGfx : cvs::Gfx {
+  TFT_eSprite* spr = nullptr;
+  TFT_eSPI* t() {
+    if (spr) return spr;
+    return &tft;
+  }
+  int width() override { return tft.width(); }
+  int height() override { return tft.height(); }
+  uint16_t color(int r, int g, int b) override { return tft.color565(clamp255(r), clamp255(g), clamp255(b)); }
+  void fillRect(int x, int y, int w, int h, uint16_t c) override { t()->fillRect(x, y, w, h, c); }
+  void drawRect(int x, int y, int w, int h, uint16_t c) override { t()->drawRect(x, y, w, h, c); }
+  void fillCircle(int x, int y, int r, uint16_t c) override { t()->fillCircle(x, y, r, c); }
+  void drawCircle(int x, int y, int r, uint16_t c) override { t()->drawCircle(x, y, r, c); }
+  void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) override { t()->fillTriangle(x0, y0, x1, y1, x2, y2, c); }
+  void hline(int x, int y, int w, uint16_t c) override { t()->drawFastHLine(x, y, w, c); }
+  void line(int x0, int y0, int x1, int y1, uint16_t c) override { t()->drawLine(x0, y0, x1, y1, c); }
+  void setText(uint16_t c, int datum) override { t()->setTextColor(c); t()->setTextDatum(datum); }
+  int drawText(const char* s, int x, int y, int font) override { return t()->drawString(s, x, y, font); }
+  int textWidth(const char* s, int font) override { return t()->textWidth(s, font); }
+  bool buffer(bool on) override {
+    if (!on) { delete spr; spr = nullptr; return true; }
+    if (spr) return true;
+    for (int depth : {16, 8}) {
+      size_t bytes = (size_t)tft.width() * tft.height() * depth / 8;
+      if (bytes + 2048 > heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) continue;  // a failed allocation here could abort the board
+      TFT_eSprite* s = new TFT_eSprite(&tft);
+      s->setTextFont(1);
+      s->setColorDepth(depth);
+      if (s->createSprite(tft.width(), tft.height())) { spr = s; return true; }
+      delete s;
+    }
+    return false;
+  }
+  void flush() override {
+    if (!spr) return;
+#ifdef BOARD_SCREEN_HEADER  // the screen is itself a sprite: blit into it
+    spr->pushToSprite(&tft, 0, 0);
+#else
+    spr->pushSprite(0, 0);
+#endif
+  }
+};
+static TftGfx tftGfx;
+
 // ------------------------------------------------------------------ LED, speaker, sensors, GPIO
 JS_NATIVE(g_led) {
   (void)self;
@@ -2132,7 +2178,9 @@ static fs::FS* pickFs(const std::string& path, std::string& rel) {
 }
 
 #if !MICROJS_RP2
-// ---- firmware files, installed into the spare OTA slot by flash.js. Three kinds:
+// ---- firmware files, installed into the spare OTA slot by the file manager (files.js). Three kinds:
+//   .EFW  the same container with an encrypted image ("ENC1" + 16 bytes + ciphertext): recognised and its
+//         notes shown, but not installable (there is no key here); the release's .FLH is the plain copy
 //   .FLH  the ESP32-CoCo emulator's format, so the two can install each other:
 //         "<checksum>-COCO ESP32 CUSTOM FIRMWARE/<release notes>~<app image>", checksum = the sum
 //         of every byte from the '-' to the end of the file, in decimal
@@ -2209,6 +2257,12 @@ static FlhInfo flhCheck(const std::string& path) {
   if (sum != want) { r.error = "checksum mismatch - the file is damaged"; file.close(); return r; }
   const char* tag = "COCO ESP32 CUSTOM FIRMWARE/";
   if (r.notes.rfind(tag, 0) == 0) r.notes.erase(0, strlen(tag));
+  uint8_t magic[4] = {0};
+  if (fileRead(file, tilde, magic, 4) && !memcmp(magic, "ENC1", 4)) {  // .EFW: the same container, the image inside is encrypted
+    r.error = "This is an encrypted .EFW image, which micro-js can't install. Use the .FLH file of the same release, or the emulator's own Flash menu.";
+    file.close();
+    return r;
+  }
   r.ok = appImage(file, tilde, r);
   file.close();
   return r;
@@ -3744,6 +3798,7 @@ void hwInstall(Interp& I) {
   Object* fsObj = I.newObject();
   fsObj->lazy = LAZY_fsObj;
   I.setGlobal("fs", Value::obj(fsObj));
+  cvs::install(I, &tftGfx);  // the global `canvas`
 
 #if MICROJS_BRIDGE  // network through the computer (tools/bridge.js)
   Object* bwifi = I.newObject();

@@ -32,7 +32,7 @@ every board:
       clock and the network.
   MICROJS_1-1-73.FLH
       ESP32-CoCo board, firmware only, for the CoCo emulator's own Flash menu: copy it to the SD
-      card, open the emulator's menu, press F and pick it. Back the other way: run flash.js in
+      card, open the emulator's menu, press F and pick it. Back the other way: in the file manager (files.js) pick
       micro-js and pick the emulator's .FLH file.
 
 Not included: the Waveshare ESP32-S3-Touch-AMOLED-2.06 watch (written but never run on a working screen).

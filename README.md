@@ -184,6 +184,10 @@ node tools/upload.js /dev/ttyACM0 song.mp3 photo.jpg --to /sd/media   # any file
 node tools/upload.js /dev/ttyACM0 micro-js-1.1.74-apps.zip           # install a release's apps (or a folder: data/); the board's micro-js.json is kept
 ```
 
+While an upload runs the board is in a quiet mode (the tools send Ctrl-E, then Ctrl-F when done): it stops echoing each
+line it receives and keeps them off the on-screen console, which made uploads to the Cardputer and the CoCo board
+about 2.5 times slower. It switches itself off after 3 seconds without input, or with Ctrl-C.
+
 (The port is `COM5` or similar on Windows.) Files go to the board's flash unless `--to` names a
 folder - `/sd/...` is the SD card, and missing folders are made. Any file works, text or binary. The
 web IDE (`tools/web-ide.html`) does the same from a browser.
@@ -290,7 +294,7 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
 | `sys.cpuMhz()` | |
 | `sys.restart()` | |
 | `sys.battery()` | `{volts, percent, charging, usb}`, or `null` without a battery sense pin |
-| `sys.firmwareInfo(path)`, `sys.installFirmware(path)` | check / install a `.FLH` or `.bin` firmware file (see `flash.js`) |
+| `sys.firmwareInfo(path)`, `sys.installFirmware(path)` | check / install a `.FLH` or `.bin` firmware file (see "Switching firmware") |
 | `sys.i2cScan()`, `sys.i2cRead(addr, reg)`, `sys.i2cWrite(addr, reg, value)` | the board's I2C bus (touch, keyboard, codec) |
 
 ### Sound, music and video
@@ -309,17 +313,10 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   seconds, duration, sound, error, ended}`. Don't draw while a video plays. The CYD-S3 plays
   320×180 at 30 fps and 320×240 at about 24 fps; frames that would be late are skipped so the
   sound never stutters.
-- **Finding the songs and videos:** `mp3.js` and `video.js` look through the SD card (the top level
-  and two folders down), which takes seconds on a card with many files (about 5 s on a media card, a
-  minute on a card holding a whole system image). A "Looking for songs / videos..." screen shows the
-  folder being listed and the count so far. The result is saved as a playlist on the card -
-  `/sd/playlist.m3u` for music, `/sd/videos.m3u` for video, ordinary M3U files - and the next start
-  reads that instead (a fraction of a second). The first line records how full the card is
-  (`fs.space`, which answers at once), so the list is rebuilt by itself when files were added or
-  removed; on the RP2350, where that figure takes too long to read, the saved list is used until you
-  rescan. **`r`** (or tapping the title on a touch screen) rescans the card whenever you want. Started
-  with one file (from the file manager), the players don't search at all: they play it, and **`l`**
-  (or the same tap) brings up the whole list. The shared code is `lib/medialist.js`.
+- **Playing from the file manager:** `files.js` plays music (a file's menu: Play; `s` stops), plays `.avi`
+  videos full screen (a tap or Space pauses, a long press or Enter stops) and shows pictures, browsing the
+  flash and SD card folders like any other files: nothing is scanned and no playlists are kept. Its Type
+  button (`f`) shows only music, video, pictures or apps.
 - Make videos with **`tools/convert-videos.sh`** on a computer (needs ffmpeg). It converts
   `.mp4`, `.mkv`, `.mov`, `.webm`... files or whole folders, picking the size and frame rate for
   the board, and can copy them straight to the SD card:
@@ -445,12 +442,47 @@ is joined to WiFi, but then both boards must be on the router's channel.
 
 On the classic CYD memory is very tight once the radio is up: a script can't be much more than 8 KB, and loading `lib/mixer.js` there aborts the board, so `espnow.js` uses `lib/litemixer.js` instead. The WiFi driver can only start while memory is still clean, so call `espnow.begin()` in a script that
 mentions `espnow.` (the board starts WiFi before it loads such a script); typing it at the REPL there fails with "the WiFi
-driver failed to start". Tested: classic CYD and CYD-S3, in both directions, broadcast and to one address, string and byte-array data.
+driver failed to start". Tested: classic CYD, CYD-S3, CoCo VGA and Cardputer ADV, in every direction, broadcast and to one address, string and byte-array data, and the `espnow.js` app (shared LED mixer, beep, chat) across all four.
 
 Messages aren't encrypted or authenticated: anything nearby can read and send them. At most 20
 different addresses can be sent to in one run. `espnow.js` is a radio version of `remote.js` (shared LED mixer, beep, chat; messages are small JSON
 broadcasts such as `{"t":"led","r":0,"g":200,...}`, `{"t":"beep"}` and `{"t":"chat","n":"name","m":"text"}`). The simulator has the calls but no radio.
 
+
+### `canvas` (browser-style drawing)
+
+The firmware has a `canvas` object with the browser's Canvas 2D calls, so drawing code written for a web page's
+`<canvas>` runs on the board: `const ctx = canvas.getContext("2d")`, then `ctx.fillStyle = "#ff8800";
+ctx.beginPath(); ctx.arc(160, 120, 40, 0, Math.PI * 2); ctx.fill()` and so on. `canvas.width` and
+`canvas.height` are the screen. `load("/lib/canvas.js")` adds `requestAnimationFrame` (about 30 frames a second
+at most); on firmware without the built-in canvas it stops with "update the board's firmware". `lcd` is untouched and can be used
+beside the canvas (they draw on the same screen); the canvas keeps its own state (colours, line width,
+transform), which `lcd` calls don't see. `data/canvasdemo.js` is an example; `tools/canvas-demo.html` runs that same
+file unchanged in a browser, on a page's own `<canvas>` (open it from a checkout, no server needed).
+
+- **Supported:** `fillRect`, `strokeRect`, `clearRect` (fills with `canvas.background`, black), `beginPath`,
+  `closePath`, `moveTo`, `lineTo`, `arc`, `ellipse`, `rect`, `roundRect`, `quadraticCurveTo`,
+  `bezierCurveTo`, `fill`, `stroke`, `fillText`, `strokeText`, `measureText`, `save`, `restore`,
+  `translate`, `scale`, `rotate`, `transform`, `setTransform`, `resetTransform`, `drawImage(path, x, y)`,
+  and the properties `fillStyle`, `strokeStyle`, `lineWidth`, `font`, `textAlign`, `textBaseline`.
+- **No flicker:** `canvas.buffer(true)` (not in a browser, so test `if (canvas.buffer)`) makes the canvas draw into an
+  off-screen image that `requestAnimationFrame` shows after each callback (`canvas.flush()` does it by hand), so you
+  never see a half-drawn frame. It needs memory: the S3 CYD has it at full colour, the Cardputer only at 8 colour bits
+  (32 KB of its remaining ~80 KB), the classic CYD not at all (it returns `false` and draws straight to the screen,
+  so a script that clears the whole screen every frame flickers there: redraw only what moved).
+  `canvas.buffer(false)` frees it.
+- **Colours** are strings: `"#rgb"`, `"#rrggbb"`, `"rgb(r,g,b)"`, `"rgba(...)"` and about twenty names. The
+  alpha is ignored, except that 0 (or `"transparent"`) draws nothing.
+- **Fonts:** `"20px sans-serif"` picks the nearest board font (up to 9px the 6x8 one, up to 18px the 16
+  high one, else the 26 high one); a lone digit in the string (`"2"`) picks that TFT_eSPI font number.
+- **Not supported:** gradients, `clip`, shadows, alpha blending, `getImageData`, `globalAlpha`, rotated text
+  (it's drawn upright at the moved anchor).
+- **Speed:** a rectangle or circle goes straight to the screen driver, a convex shape is drawn as a triangle fan,
+  a small concave one is cut into triangles, anything else is filled a row at a time; thick lines are filled quads
+  (no anti-aliasing). `data/canvasdemo.js` (about 15 shapes a frame) runs at about 20 frames a second on the
+  Cardputer and 19 on the S3 CYD (buffered) and about 10 on the classic CYD (drawing straight to the screen);
+  the code is `src/canvas2d.h`, shared by the boards and the simulator. (An earlier JavaScript version managed
+  about 11 on the first two and didn't fit on the classic CYD.)
 
 ## Examples (`data/`)
 
@@ -464,8 +496,9 @@ broadcasts such as `{"t":"led","r":0,"g":200,...}`, `{"t":"beep"}` and `{"t":"ch
 | `controls.js` | the LED colour mixer (red / green / blue / brightness / cycle-speed sliders, auto colour cycling, a swatch matching the LED), backlight and beep |
 | `remote.js` | a web remote: open the address it shows on a phone or computer for the LED mixer, a beep button and a chat with the board (the page is `remote.html`). If it can't join your WiFi it makes its own network (`micro-js-xxxx`, or `"ap": {"ssid", "pass"}` in `micro-js.json`) and phones that join get the page by themselves |
 | `demo.js` | a demoscene show - plasma, starfield, a shaded cube, copper bars and a scroller - to an original chiptune (tap / Space: next effect, `m`: music) |
-| `neopix.js` | drives a WS2812 / NeoPixel strip or matrix from a GPIO (CYD: CN1, GPIO 27 or 22): pick the pin, LED count, grid columns, wiring (zigzag or not), pattern (rainbow, chase, scanner, fire, plasma, ripple, rain...), colour, speed and brightness, with a live preview. ESP32 only; tested on the classic CYD |
+| `neopix.js` | drives a WS2812 / NeoPixel strip or matrix from a GPIO (CYD: CN1, GPIO 27 or 22): pick the pin, LED count, grid columns, wiring (zigzag or not), pattern (rainbow, chase, scanner, fire, plasma, ripple, rain...), colour, speed and brightness, with a live preview. ESP32 only (not the CoCo VGA board: no free pins); tested on the classic CYD |
 | `espnow.js` | what `remote.js` does, board to board over ESP-NOW with no router: a shared LED colour mixer (move a slider on one board and every board's LED follows), Beep that beeps the other boards, and chat (type on a keyboard board, or the Say button steps through ready-made messages on a touch board) |
+| `canvasdemo.js` | a rotating star, clock hand, bouncing ball and wave drawn with the browser-style `canvas` calls instead of `lcd` |
 | `life.js` | Conway's Game of Life, redrawing only cells that change |
 | `fetch.js` | fetches weather + stocks (+ news) and writes them to small cache files, then launches `weather.js`. The one app that uses WiFi. See "The weather dashboard" below |
 | `weather.js` | the dashboard display: now / hourly / 5 days / stocks / news (°C and °F). Reads the cache files `fetch.js` wrote - no WiFi - so it stays light. Tap left/right (or `,` `/`) to change page; pages rotate every 30 s |
@@ -475,10 +508,7 @@ broadcasts such as `{"t":"led","r":0,"g":200,...}`, `{"t":"beep"}` and `{"t":"ch
 | `snake.js` | tap on the side you want to turn to |
 | `flappy.js` | tap to flap |
 | `bruce.js` | a Bruce-style tool menu: WiFi analyzer, system monitor, the LED colour mixer, sensor readouts (touch or keyboard) |
-| `files.js` | file manager for the flash and SD card: open, run, view text and pictures (swipe, rotate), play music and videos, copy / move / rename / delete, new folders |
-| `mp3.js` | music player for the `.mp3` files on the SD card; started from the file manager ("Open in MP3 player") it just plays that file |
-| `video.js` | video player for `.avi` files (see "Sound, music and video"); started from the file manager it just plays that file |
-| `flash.js` | installs `.FLH` and `.bin` firmware files from the SD card (see "Switching firmware") |
+| `files.js` | file manager for the flash and SD card: open, run, view text and pictures (swipe, rotate), play music and videos, copy / move / rename / delete, new folders, filter by type (all / music / video / pictures / apps), install firmware files (see "Switching firmware") |
 | `calibrate.js` | touch calibration |
 | `edit.js` | a JavaScript editor for keyboard boards (`.edit FILE` in the console) |
 | `joystick.js` | live view of USB gamepads |
@@ -662,12 +692,14 @@ lib/                  ESP32-S3-VGA and SoftUSB, used only by the coco-vga profil
 data/                 the apps -> flashed with `pio run -t uploadfs`
 data/lib/mixer.js     the LED colour mixer, loaded by controls.js, bruce.js and remote.js
 data/lib/litemixer.js  a small version of that mixer, for the classic CYD with the radio on (espnow.js)
+data/lib/canvas.js      requestAnimationFrame for the built-in canvas
+src/canvas2d.h          the canvas (Canvas 2D API), shared by hw.cpp and the simulator
 host/                 desktop build, simulator, test suite (stb_image.h: picture loading)
 tools/upload.js       copy files to the board over serial (npm install first)
 tools/web-ide.html    browser IDE over USB: files, editor, upload, console, firmware flashing
 tools/serve.js        serves the IDE at http://localhost:8000 (node tools/serve.js, or npm run ide)
 tools/build_release.sh       web-flasher images for every board, into release/
-tools/convert-videos.sh      videos -> .avi for video.js
+tools/convert-videos.sh      videos -> .avi for the file manager
 tools/make-flh.js            wrap a firmware.bin as an .FLH file
 tools/auto-version.js        bumps src/version.h when the code changed (run before each build)
 package.json                 the Node tools' one dependency (serialport)
@@ -744,7 +776,7 @@ through the computer it's plugged into instead (below). There's no `web` server 
 - **Flashing:** `pio run -e rp2350-pizero -t upload` (if it can't find the board, hold BOOT
   while plugging it in; on Linux picotool also needs the Raspberry Pi udev rule:
   `SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666"` in `/etc/udev/rules.d/99-picotool.rules`), then `pio run -e rp2350-pizero -t uploadfs` for the apps; or drag a
-  release `.uf2` onto the board's drive. `flash.js` doesn't apply (it installs ESP32 firmware).
+  release `.uf2` onto the board's drive. the file manager's "Install firmware..." doesn't apply (it installs ESP32 firmware).
 - **Not yet:** sound over HDMI, the BOOT button as a menu key (it's wired to the flash chip),
   installing firmware from a file, WiFi through an add-on board, a web server over the USB bridge.
 - If it ever hangs while starting up, a watchdog restarts it after 8 seconds and skips the step that
@@ -754,14 +786,24 @@ through the computer it's plugged into instead (below). There's no `web` server 
 
 ## Switching firmware (`.FLH` files)
 
-`flash.js` installs firmware from the SD card into the board's spare firmware slot, keeping the
-apps on the flash. It takes plain `firmware.bin` files, full flash images (only their firmware
+The file manager (`files.js`) installs firmware from the SD card into the board's spare firmware slot,
+keeping the apps on the flash: browse to a `.FLH` or `.bin` file, open its menu and choose "Install
+firmware...". On the S3 boards the launcher has a **flash** button that opens the file manager straight
+on the SD card showing only firmware files (its Flash type filter). It shows the file's checks and release notes first and asks before writing. It takes plain
+`firmware.bin` files, full flash images (only their firmware
 part is used), and `.FLH` files - the ESP32-CoCo emulator's format (a checksum, release notes,
 then the firmware). So on the CoCo board you can switch between micro-js and the emulators from
-either side: micro-js → `flash.js` → the emulator's `.FLH`; emulator → its Flash menu (F) →
+either side: micro-js → file manager → the emulator's `.FLH`; emulator → its Flash menu (F) →
 `MICROJS_<version>.FLH`, which `tools/build_release.sh` makes (or `node tools/make-flh.js firmware.bin OUT.FLH
 "notes"`). Every file is checked (checksum, image, chip) before anything is written. Boards with
 no spare slot (the classic CYD's partition table) can't install this way.
+
+**`.EFW` files** (newer ESP32-CoCo firmware releases ship both): the same container as `.FLH` - the checksum, the
+release notes, `~` - but the image after the `~` is encrypted: it starts with the text `ENC1`, 16 more bytes,
+then data as long as the plain image (so the file is exactly 20 bytes bigger than the `.FLH` of the same
+release). The file manager lists them under the Flash filter and checks their checksum and shows their release
+notes, but can't install them (the key isn't here, and isn't something to work out): install the `.FLH` from the
+same release instead, or use the emulator's own Flash menu.
 
 ## Credits and licences
 

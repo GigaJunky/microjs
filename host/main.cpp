@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
     WebSim web;
     std::unique_ptr<js::Interp> ip;
     std::string current = script;  // what BOOT runs: the script given on the command line
-    auto start = [&](const std::string& path, bool fromSimFs) {
+    auto start = [&](const std::string& path, bool fromSimFs, const std::string& arg = "") {
       ip.reset();
       ip.reset(new js::Interp());
       ip->write = [&web](const char* s, size_t n) {
@@ -122,16 +122,19 @@ int main(int argc, char** argv) {
       std::string src;
       bool ok = fromSimFs ? simReadFile(path, src) : readFile(path, src);
       if (!ok) web.log += "cannot read " + path + "\n";
-      else ip->runSafe(src, path.c_str());
+      else {
+        if (!arg.empty()) ip->setGlobal("ARG", ip->str(arg));
+        ip->runSafe(src, path.c_str());
+      }
     };
     web.boot = [&]() { start(current, false); };
     web.step = [&]() {
       simPoll(*ip, now());
       ip->runTimers();
-      std::string next = simTakeLaunch();
+      std::string next = simTakeLaunch(), nextArg = simTakeLaunchArg();
       if (!next.empty()) {
         web.log += "\nrunning " + next + "\n";
-        start(next, true);
+        start(next, true, nextArg);
       }
     };
     web.runCode = [&](const std::string& code) {

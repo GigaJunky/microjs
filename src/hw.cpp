@@ -2575,7 +2575,8 @@ JS_NATIVE(fs_contains) {  // fs.contains(path, text): searched in pieces, never 
 JS_NATIVE(fs_dir) {  // fs.dir(path, [skip, limit]) -> [{ name, size, dir }] (skip and limit: a page of a folder too big to list at once)
   (void)self;
   Array* a = I.newArray();
-  size_t skip = argc > 1 ? (size_t)std::max(0, I.toInt32(args[1])) : 0, limit = argc > 2 ? (size_t)std::max(0, I.toInt32(args[2])) : 0;
+  int32_t sk = argc > 1 ? I.toInt32(args[1]) : 0, lm = argc > 2 ? I.toInt32(args[2]) : 0;
+  size_t skip = sk > 0 ? (size_t)sk : 0, limit = lm > 0 ? (size_t)lm : 0;
   for (auto& e : hwList(argc ? I.toStr(args[0]) : "/", skip, limit)) a->items.push_back(entryObj(I, e.name, e.size, e.dir));
   return Value::obj(a);
 }

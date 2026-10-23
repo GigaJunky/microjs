@@ -313,10 +313,13 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   seconds, duration, sound, error, ended}`. Don't draw while a video plays. The CYD-S3 plays
   320×180 at 30 fps and 320×240 at about 24 fps; frames that would be late are skipped so the
   sound never stutters.
-- **Playing from the file manager:** `files.js` plays music (a file's menu: Play; `s` stops), plays `.avi`
-  videos full screen (a tap or Space pauses, a long press or Enter stops) and shows pictures, browsing the
+- **Playing from the file manager:** `files.js` plays music and `.avi` videos (a file's menu: Play; a tap or Space
+  pauses, a long press or Enter stops, and the list comes back when it ends) and shows pictures, browsing the
   flash and SD card folders like any other files: nothing is scanned and no playlists are kept. Its Type
-  button (`f`) shows only music, video, pictures or apps.
+  button (`f`) shows only music, video, pictures or apps. To keep `files.js` small enough for the classic CYD,
+  the menu, the viewers, the player and the file operations are separate apps in `lib/` (`fmenu.js`, `fview.js`,
+  `fplay.js`, `fops.js`) that it launches - each starts with a clean heap - and where you were is kept in
+  `/files.state`. Big folders are read 40 entries at a time (a "More..." row), with `fs.dir(path, skip, limit)`.
 - Make videos with **`tools/convert-videos.sh`** on a computer (needs ffmpeg). It converts
   `.mp4`, `.mkv`, `.mov`, `.webm`... files or whole folders, picking the size and frame rate for
   the board, and can copy them straight to the SD card:
@@ -337,7 +340,7 @@ flash (about 900 KB).
 
 - `fs.read(path)` → string or `null`
 - `fs.write(path, text)`, `fs.append(path, text)` → bool
-- `fs.list([dir])` → names (directories end in `/`); `fs.dir([dir])` → `[{name, size, dir}]`
+- `fs.list([dir])` → names (directories end in `/`); `fs.dir([dir, skip, limit])` → `[{name, size, dir}]` (`skip` and `limit` read a page of a folder too big to list in one go)
 - `fs.exists(path)`, `fs.remove(path)`, `fs.stat(path)` → `{name, size, dir}` or `null`
 - `fs.mkdir(path)`, `fs.rmdir(path)` (empty folders), `fs.rename(from, to)` (same storage)
 - `fs.copy(from, to)` (any size, also between flash and SD), `fs.space("/" or "/sd")` →
@@ -611,7 +614,8 @@ on the Cardputer, 147 on the RP2350, thousands on the PSRAM boards).
 **The classic CYD is a limited board.** With no PSRAM it has about 100 KB for scripts, and the
 games and small apps run well; the big apps above, and anything using WiFi, are at the edge of its
 memory and may stop with "out of memory". Boards with PSRAM (the S3 CYD, the CoCo VGA board, the
-Cardputer) run everything.
+Cardputer) run everything. On the classic, music plays (the decoder's buffers are packed into the few free
+blocks it has) but video does not: the JPEG decoder wants one 18 KB block and the largest free one is 17 KB.
 
 **Memory and speed:**
 - The interpreter task has a 40 KB stack, which allows about 35 levels of JS recursion.
@@ -796,7 +800,9 @@ then the firmware). So on the CoCo board you can switch between micro-js and the
 either side: micro-js → file manager → the emulator's `.FLH`; emulator → its Flash menu (F) →
 `MICROJS_<version>.FLH`, which `tools/build_release.sh` makes (or `node tools/make-flh.js firmware.bin OUT.FLH
 "notes"`). Every file is checked (checksum, image, chip) before anything is written. Boards with
-no spare slot (the classic CYD's partition table) can't install this way.
+no spare slot can't install this way. The classic CYD has two 1.5 MB slots (`partitions/cyd_ota.csv`: the old one
+3 MB slot cut in two, the files kept where they were); flash it once over USB, and a firmware over 1.5 MB
+no longer fits (go back to `huge_app.csv`).
 
 **`.EFW` files** (newer ESP32-CoCo firmware releases ship both): the same container as `.FLH` - the checksum, the
 release notes, `~` - but the image after the `~` is encrypted: it starts with the text `ENC1`, 16 more bytes,

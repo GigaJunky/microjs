@@ -13,6 +13,8 @@ void hwService();                   // cheap housekeeping (tone timeout); safe t
 void hwStop(js::Interp& I);         // Ctrl-C: drop handlers, silence speaker
 void hwReset();                     // display, LED and backlight back to their boot defaults
 void hwShowError(const std::string& title, const std::string& msg);  // full-screen error message
+void hwSdRelease();                  // let go of the SD card (its memory) / mount it again
+void hwSdEnsure();
 void hwWifiPrepare(bool use);       // start (or stop) the WiFi driver before a script is loaded
 void hwNetReserve();                // set aside memory for HTTP requests (call after parsing)
 void hwNetRelease();                // free that reserve (before loading the next script)
@@ -52,4 +54,4 @@ bool hwReadFile(const std::string& path, std::string& out);
 bool hwFileContains(const std::string& path, const char* needle);
 bool hwWriteFile(const std::string& path, const std::string& data, bool append = false);
 bool hwRemove(const std::string& path);
-std::vector<FileEntry> hwList(const std::string& dir);
+std::vector<FileEntry> hwList(const std::string& dir, size_t skip = 0, size_t limit = 0);  // limit 0: all of them

@@ -229,6 +229,21 @@ typedef struct
     uint8_t preflag, scalefac_scale, count1_table, scfsi;
 } L3_gr_info_t;
 
+#ifdef MINIMP3_SPLIT_SCRATCH
+/* the big arrays (16 KB together) are separate allocations made by the caller (mp3d_scratch_*), so that a
+   small board needs no 16 KB block, and its stack none of it: the decoder is short of both */
+static uint8_t *mp3d_scratch_main;  /* MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES */
+static float *mp3d_scratch_gr;      /* 2*576 */
+static float *mp3d_scratch_syn;     /* (18 + 15)*2*32 */
+typedef struct
+{
+    bs_t bs;
+    uint8_t *maindata;
+    L3_gr_info_t gr_info[4];
+    float (*grbuf)[576], scf[40], (*syn)[2*32];
+    uint8_t ist_pos[2][39];
+} mp3dec_scratch_t;
+#else
 typedef struct
 {
     bs_t bs;
@@ -237,6 +252,7 @@ typedef struct
     float grbuf[2][576], scf[40], syn[18 + 15][2*32];
     uint8_t ist_pos[2][39];
 } mp3dec_scratch_t;
+#endif
 
 static void bs_init(bs_t *bs, const uint8_t *data, int bytes)
 {
@@ -1716,6 +1732,12 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
     const uint8_t *hdr;
     bs_t bs_frame[1];
     mp3dec_scratch_t scratch;
+#ifdef MINIMP3_SPLIT_SCRATCH
+    if (!mp3d_scratch_main || !mp3d_scratch_gr || !mp3d_scratch_syn) return 0;
+    scratch.maindata = mp3d_scratch_main;
+    scratch.grbuf = (float (*)[576])mp3d_scratch_gr;
+    scratch.syn = (float (*)[2*32])mp3d_scratch_syn;
+#endif
 
     if (mp3_bytes > 4 && dec->header[0] == 0xff && hdr_compare(dec->header, mp3))
     {

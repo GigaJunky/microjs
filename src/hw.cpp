@@ -49,6 +49,9 @@ static BOARD_SCREEN_CLASS tft;
 static TFT_eSPI tft;
 #endif
 static bool sdOk = false, fsOk = false;
+#if !MICROJS_RP2 && !defined(BOARD_SD_MMC_CLK) && BOARD_SD_CS >= 0
+static SPIClass* sdSpiBus = nullptr;  // the SD card's SPI bus, kept so the card can be mounted again
+#endif
 static fs::FS* pickFs(const std::string& path, std::string& rel);  // "/sd/..." or the flash
 #if JS_WIFI
 static WebServer* webServer = nullptr;  // web.start's server (see "web:" below)
@@ -472,6 +475,9 @@ static void musicWrite(int16_t* pcm, int samples, int channels) {
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_NO_SIMD
+#if !BOARD_PSRAM
+#define MINIMP3_SPLIT_SCRATCH  // (see minimp3.h)
+#endif
 #include "minimp3.h"
 volatile bool mp3Stop = false;
 static volatile bool mp3Paused = false;
@@ -507,15 +513,30 @@ static uint8_t* mp3In = nullptr;
 static mp3dec_t* mp3Dec = nullptr;
 static int16_t* mp3Pcm = nullptr;
 static size_t mp3InSize = 0;
+#ifdef MINIMP3_SPLIT_SCRATCH
+static void *mp3BlockX = nullptr, *mp3BlockY = nullptr;  // the decoder's buffers, in two pieces (see mp3Start)
+#endif
 static void mp3FreeBuffers() {
   free(mp3In);
-  free(mp3Dec);
-  free(mp3Pcm);
   mp3In = nullptr;
+#ifdef MINIMP3_SPLIT_SCRATCH
+  free(mp3BlockX);
+  free(mp3BlockY);
+  mp3BlockX = mp3BlockY = nullptr;
   mp3Dec = nullptr;
   mp3Pcm = nullptr;
+  mp3d_scratch_main = nullptr;
+  mp3d_scratch_gr = mp3d_scratch_syn = nullptr;
+#else
+  free(mp3Dec);
+  free(mp3Pcm);
+  mp3Dec = nullptr;
+  mp3Pcm = nullptr;
+#endif
 }
+static volatile bool mp3Go = false;  // mp3Start has handed the buffers over (the task is made first: see there)
 static void mp3Run(void*) {
+  while (!mp3Go) vTaskDelay(1);
   std::string rel;
   fs::FS* fsys = pickFs(mp3Path, rel);
   File f = fsys ? fsys->open(rel.c_str(), "r") : File();
@@ -526,7 +547,12 @@ static void mp3Run(void*) {
   uint8_t* in = mp3In;
   mp3dec_t* dec = mp3Dec;
   int16_t* pcm = mp3Pcm;
-  if (!f || !in || !dec || !pcm) mp3Error = !f ? "can't open the file" : "not enough memory";
+#ifdef MINIMP3_SPLIT_SCRATCH
+  const bool scratchOk = mp3d_scratch_main && mp3d_scratch_gr && mp3d_scratch_syn;
+#else
+  const bool scratchOk = true;
+#endif
+  if (!f || !in || !dec || !pcm || !scratchOk) mp3Error = !f ? "can't open the file" : "not enough memory";
   else {
     mp3Size = isAvi ? mp3AviEnd - mp3AviStart : f.size();
     uint8_t id3[10];  // skip an ID3v2 tag (cover art in it can look like MP3 frames)
@@ -591,7 +617,35 @@ static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint
   mp3ApplyVolume();
   // the input buffer holds a few MP3 frames: 8 KB is enough where memory is short (320 kbps frames
   // are about 1 KB), 4 KB for a video's sound (one 96 kbps stream, frames of ~300 bytes), 16 KB elsewhere
-  mp3InSize = BOARD_PSRAM ? 16 * 1024 : aviEnd ? 4 * 1024 : 8 * 1024;
+  mp3InSize = BOARD_PSRAM ? 16 * 1024 : 3072;
+#ifdef MINIMP3_SPLIT_SCRATCH
+  // Without PSRAM the free memory is a few blocks (the CYD's: 17, 14, 7 and 4 KB, then small ones), so the
+  // decoder's buffers are packed into pieces that fit them, the task stack, a block of its own, first:
+  //   task stack 6 KB -> the 7;  X: syn + gr 13 KB -> the 14;  Y: decoder + pcm + main 14 KB -> the 17;
+  //   input 3 KB -> the 4.   (Taken in this order, each goes to the smallest block that holds it.)
+  mp3Go = false;
+  mp3Active = true;
+  if (xTaskCreatePinnedToCore(mp3Run, "mp3", 6 * 1024, nullptr, 4, &mp3Task, 0) != pdPASS) {
+    mp3Active = false;
+    mp3Task = nullptr;
+    return "not enough memory to play";
+  }
+  const size_t MP3_SYN_B = 33 * 64 * sizeof(float), MP3_GR_B = 2 * 576 * sizeof(float);
+  const size_t MP3_DEC_B = (sizeof(mp3dec_t) + 7) & ~(size_t)7, MP3_PCM_B = MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t);  // (what the decoder writes)
+  mp3BlockX = malloc(MP3_SYN_B + MP3_GR_B);
+  mp3BlockY = malloc(MP3_DEC_B + MP3_PCM_B + MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES);
+  mp3In = (uint8_t*)malloc(mp3InSize);
+  bool ok = mp3BlockX && mp3BlockY && mp3In;
+  if (ok) {
+    mp3d_scratch_syn = (float*)mp3BlockX;
+    mp3d_scratch_gr = (float*)((uint8_t*)mp3BlockX + MP3_SYN_B);
+    mp3Dec = (mp3dec_t*)mp3BlockY;
+    mp3Pcm = (int16_t*)((uint8_t*)mp3BlockY + MP3_DEC_B);
+    mp3d_scratch_main = (uint8_t*)mp3BlockY + MP3_DEC_B + MP3_PCM_B;
+  } else mp3FreeBuffers();
+  mp3Go = true;  // (without the buffers the task says so and ends)
+  if (!ok) { mp3StopWait(); return "not enough memory to play"; }
+#else
   mp3In = (uint8_t*)heap_caps_malloc(mp3InSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!mp3In) mp3In = (uint8_t*)malloc(mp3InSize);
   mp3Dec = (mp3dec_t*)malloc(sizeof(mp3dec_t));
@@ -600,6 +654,7 @@ static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint
     mp3FreeBuffers();
     return "not enough memory to play";
   }
+  mp3Go = true;
   mp3Active = true;
   if (xTaskCreatePinnedToCore(mp3Run, "mp3", 20 * 1024, nullptr, 4, &mp3Task, 0) != pdPASS) {
     mp3Active = false;
@@ -607,6 +662,7 @@ static std::string mp3Start(const std::string& path, uint32_t aviStart = 0, uint
     mp3FreeBuffers();
     return "not enough memory to play";
   }
+#endif
   return "";
 }
 #endif
@@ -2168,6 +2224,17 @@ JS_NATIVE(g_localTime) {
 }
 
 // ------------------------------------------------------------------ files
+// A mounted SD card holds on to about 30 KB of heap on the classic CYD (a 29 GB card: its tables and
+// buffers), which the WiFi driver and the other big apps need. So a launch that uses WiFi but never names
+// the card lets it go (hwSdRelease) - and so does any launch on a board this small - and a launch that does
+// use it mounts it again (hwSdEnsure).
+#if !MICROJS_RP2 && !defined(BOARD_SD_MMC_CLK) && BOARD_SD_CS >= 0
+void hwSdRelease() { if (sdOk) { SD.end(); sdOk = false; } }
+void hwSdEnsure() { if (!sdOk && sdSpiBus) sdOk = SD.begin(BOARD_SD_CS, *sdSpiBus, BOARD_SD_HZ); }
+#else
+void hwSdRelease() {}
+void hwSdEnsure() {}
+#endif
 static fs::FS* pickFs(const std::string& path, std::string& rel) {
   if (path == "/sd" || path.rfind("/sd/", 0) == 0) {
     rel = path.size() > 3 ? path.substr(3) : "/";
@@ -2282,7 +2349,7 @@ JS_NATIVE(sys_installFirmware) {  // sys.installFirmware(path): checks, writes t
   std::string path = argc ? I.toStr(args[0]) : "";
   FlhInfo r = flhCheck(path);
   if (!r.ok) return I.str(r.error);
-  if (!Update.begin(r.imageSize)) return I.str("this board has no room for an update (no OTA partition)");
+  if (!Update.begin(r.imageSize)) return I.str(std::string("can't start the update: ") + Update.errorString() + " (the image is " + std::to_string(r.imageSize) + " bytes)");
   std::string rel;
   fs::FS* f = pickFs(path, rel);
   File file = f->open(rel.c_str(), "r");
@@ -2337,7 +2404,7 @@ bool hwReadFile(const std::string& path, std::string& out) {
   // Loading a file is one contiguous allocation its whole size. When the heap is too fragmented
   // to hold it, fail gracefully here: on this board a failed operator new aborts (the C++ runtime
   // can't raise the out-of-memory exception when memory is this low), which would crash the board.
-  if (sz + 512 > heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) { file.close(); return false; }
+  if (sz + 64 > heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) { file.close(); return false; }  // (the string takes sz + 1; the 512 this once left was more than the allocation needs)
   out.clear();
   out.reserve(sz);
   char buf[512];
@@ -2386,14 +2453,17 @@ bool hwRemove(const std::string& path) {
   return f && f->remove(rel.c_str());
 }
 
-std::vector<FileEntry> hwList(const std::string& dir) {
+std::vector<FileEntry> hwList(const std::string& dir, size_t skip, size_t limit) {
   std::vector<FileEntry> r;
   std::string rel;
   fs::FS* f = pickFs(dir.empty() ? "/" : dir, rel);
   if (!f) return r;
   File root = f->open(rel.c_str(), "r");
   if (!root || !root.isDirectory()) return r;
-  for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+  size_t n = 0;
+  for (File e = root.openNextFile(); e; e = root.openNextFile(), n++) {
+    if (n < skip) continue;
+    if (limit && r.size() >= limit) break;
     std::string name = e.name();
     size_t slash = name.rfind('/');
     if (slash != std::string::npos) name = name.substr(slash + 1);
@@ -2502,10 +2572,11 @@ JS_NATIVE(fs_contains) {  // fs.contains(path, text): searched in pieces, never 
   (void)self;
   return Value::boolean(hwFileContains(I.toStr(JS_ARG(0)), I.toStr(JS_ARG(1)).c_str()));
 }
-JS_NATIVE(fs_dir) {  // fs.dir(path) -> [{ name, size, dir }]
+JS_NATIVE(fs_dir) {  // fs.dir(path, [skip, limit]) -> [{ name, size, dir }] (skip and limit: a page of a folder too big to list at once)
   (void)self;
   Array* a = I.newArray();
-  for (auto& e : hwList(argc ? I.toStr(args[0]) : "/")) a->items.push_back(entryObj(I, e.name, e.size, e.dir));
+  size_t skip = argc > 1 ? (size_t)std::max(0, I.toInt32(args[1])) : 0, limit = argc > 2 ? (size_t)std::max(0, I.toInt32(args[2])) : 0;
+  for (auto& e : hwList(argc ? I.toStr(args[0]) : "/", skip, limit)) a->items.push_back(entryObj(I, e.name, e.size, e.dir));
   return Value::obj(a);
 }
 JS_NATIVE(fs_stat) {  // fs.stat(path) -> { name, size, dir } or null
@@ -2978,6 +3049,7 @@ void hwBegin() {
 #endif
   pinMode(BOARD_SD_MISO, INPUT_PULLUP);        // DAT0/MISO needs a pull-up to read reliably
   static SPIClass sdSpi(BOARD_SD_SPI_HOST);  // its own bus: the display has the other one
+  sdSpiBus = &sdSpi;
   sdSpi.begin(BOARD_SD_SCK, BOARD_SD_MISO, BOARD_SD_MOSI, BOARD_SD_CS);
   sdOk = SD.begin(BOARD_SD_CS, sdSpi, BOARD_SD_HZ);
 #endif

@@ -711,7 +711,8 @@ JS_NATIVE(fs_dir) {
   std::error_code ec;
   for (auto& e : sfs::directory_iterator(fsPath(argc ? I.toStr(args[0]) : "/"), ec)) ps.push_back(e.path());
   std::sort(ps.begin(), ps.end());
-  for (auto& p : ps) a->items.push_back(simEntry(I, p));
+  size_t skip = argc > 1 ? (size_t)std::max(0, I.toInt32(args[1])) : 0, limit = argc > 2 ? (size_t)std::max(0, I.toInt32(args[2])) : 0;
+  for (size_t i = skip; i < ps.size() && (!limit || i - skip < limit); i++) a->items.push_back(simEntry(I, ps[i]));
   return Value::obj(a);
 }
 JS_NATIVE(fs_stat) {

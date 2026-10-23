@@ -105,6 +105,22 @@ Open the REPL:
 pio device monitor
 ```
 
+**Serial port.** PlatformIO finds the board's port by itself. If it picks the wrong one (or you
+have several boards), list them with `pio device list` (on Windows `COM3`, `COM4`, ...; the CYD's
+CH340 chip shows as "USB-SERIAL CH340") and name it on the command line:
+
+```powershell
+pio device list
+pio run -e cyd -t upload   --upload-port COM4
+pio run -e cyd -t uploadfs --upload-port COM4
+pio device monitor -p COM4
+```
+
+To pin a port permanently, add `upload_port` / `monitor_port` to your env (on Linux,
+`/dev/serial/by-id/...` is a name that survives replugging). If `pio` is "not recognized", use PlatformIO's own copy
+(`%USERPROFILE%\.platformio\penv\Scripts\pio.exe`) or the PlatformIO terminal in VS Code. Only one
+program can hold a port: close the monitor before uploading.
+
 For another board add its profile to each command, e.g. `pio run -e cyd-s3 -t upload`. If your
 CYD has **two USB ports** (the "CYD2USB" variant with an ST7789 panel), use `-e cyd2usb`. If the
 colours look inverted, try `lcd.invert(true)`.
@@ -121,7 +137,7 @@ there. `tools/version-state.json` remembers the last fingerprint - keep it with 
 and one `micro-js-<version>-apps.zip` with the apps for every board. Flash the firmware at address 0
 with [esptool-js](https://espressif.github.io/esptool-js/) in Chrome or Edge (it keeps the apps and
 settings already on the board). Then install the apps: drop the zip on the web IDE's file list
-(`node tools/serve.js`), or run `node tools/upload.js /dev/ttyACM0 micro-js-<version>-apps.zip`; a
+(`node tools/serve.js`), or run `node tools/upload.js /dev/ttyACM0 micro-js-<version>-apps.zip` (`COM4` etc. on Windows); a
 `micro-js.json` already on the board is kept. The RP2350-PiZero takes `.uf2` files instead: hold its
 BOOT button while plugging it into a computer, and drag `micro-js-<version>-rp2350-pizero-firmware.uf2`
 onto the drive that appears.
@@ -176,8 +192,13 @@ files, so the board needs firmware 1.0.0 or later.
 
 ### Uploading scripts from your computer
 
+The first argument is the board's serial port: `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux,
+`/dev/cu.usbserial-*` on macOS, `COM4` (or whichever `pio device list` shows) on Windows. The
+examples use Linux names; on Windows swap in your COM port.
+
 ```bash
 npm install                                                   # once: gets the serialport package
+node tools/upload.js COM4 myapp.js --run                      # Windows: same, with a COM port
 node tools/upload.js /dev/ttyUSB0 myapp.js --run              # upload + run, streams output
 node tools/upload.js /dev/ttyUSB0 myapp.js --as main.js       # make it the boot script
 node tools/upload.js /dev/ttyACM0 song.mp3 photo.jpg --to /sd/media   # any file, any folder

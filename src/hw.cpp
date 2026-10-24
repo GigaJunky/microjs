@@ -20,6 +20,13 @@
 #include <esp_wifi.h>
 #endif
 #include <memory>
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+#include <esp_system.h>
+#include <esp_rom_sys.h>
+#endif
+#ifndef JS_BLE
+#define JS_BLE 0
+#endif
 #if !MICROJS_RP2
 #include <Update.h>
 #endif
@@ -39,6 +46,35 @@
 #include "version.h"
 
 using namespace js;
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+RTC_NOINIT_ATTR static uint32_t rtcMagic;  // survives every reset except a real power loss (board.rtcSurvived)
+static bool rtcSurvived = false;
+static void rtcMark() { rtcSurvived = rtcMagic == 0xC0FFEE42u; rtcMagic = 0xC0FFEE42u; }
+#endif
+#if CONFIG_IDF_TARGET_ESP32S3 && JS_BLE
+#include <Preferences.h>
+// the last boots: "cause/rtcKept;..." (the chip's reset code, and whether RTC memory kept its marker), kept in flash
+// so a reset that costs the USB connection can still be read afterwards (board.bootLog)
+static std::string bootLogText;
+static void bootLogAdd() {
+  Preferences pr;
+  pr.begin("mjsboot", false);
+  std::string h = pr.getString("h", "").c_str();
+  h += std::to_string((int)esp_rom_get_reset_reason(0)) + "/" + (rtcSurvived ? "1" : "0") + ";";
+  size_t cut = 0;
+  for (int n = 0, i = (int)h.size() - 1; i >= 0; i--) if (h[i] == ';' && ++n > 8) { cut = i + 1; break; }  // keep the last 8
+  h = h.substr(cut);
+  pr.putString("h", h.c_str());
+  pr.end();
+  bootLogText = h;
+}
+#endif
+// keys and joysticks from another driver (USB HID host, or a Bluetooth LE HID host on a board with no keyboard)
+#if BOARD_KEYBOARD == KEYBOARD_EXTERNAL || (BOARD_KEYBOARD == KEYBOARD_NONE && JS_BLE)
+#define EXT_INPUT 1
+#else
+#define EXT_INPUT 0
+#endif
 
 static const int CH_R = 0, CH_G = 1, CH_B = 2, CH_BL = 3, CH_SPK = 6;  // LEDC channels
 
@@ -71,6 +107,10 @@ static Object* joyHandlers = nullptr;
 static Object* spriteProto = nullptr;
 
 #define IA(i) I.toInt32(JS_ARG(i))
+// (before PNGdec: its zutil.h #defines local, which NimBLE uses as a name)
+#if JS_BLE
+#include "ble.h"  // Bluetooth LE: scanning and a HID keyboard/mouse/gamepad (S3 boards)
+#endif
 #define FA(i) ((float)I.toNum(JS_ARG(i)))
 #define CA(i) colorArg(I, JS_ARG(i))
 
@@ -982,7 +1022,7 @@ static Value heldKeys(Interp& I) {
       if (kbDown[r][c]) a->items.push_back(I.str(keyName(r, c)));
   return Value::obj(a);
 }
-#elif BOARD_KEYBOARD == KEYBOARD_EXTERNAL
+#elif EXT_INPUT
 // Keys from a separate driver (e.g. a USB HID keyboard serviced by its own task), handed over
 // with hwKeyEvent() through a small locked queue. Names follow the browser's KeyboardEvent.key
 // ("a", "A", "Enter", "ArrowUp", ...); mods: 1 shift, 2 ctrl, 4 alt, 8 meta.
@@ -1079,7 +1119,7 @@ static portMUX_TYPE joyMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool joyKeys = true;
 static uint8_t joyKeyState[HW_JOYSTICKS];  // bits: left, right, up, down, button 1, button 2
 static const char* const JOY_KEY_NAMES[] = {"ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Enter"};
-void hwJoystickUpdate(int n, const HwJoystick& s) {
+static void joySet(int n, const HwJoystick& s, bool emulateKeys) {
   if (n < 0 || n >= HW_JOYSTICKS) return;
   portENTER_CRITICAL(&joyMux);
   joy[n] = s;
@@ -1096,10 +1136,12 @@ void hwJoystickUpdate(int n, const HwJoystick& s) {
   if (s.buttons & 2) now |= 1 << 5;
   if (!s.connected) now = 0;
   joyKeyState[n] = now;
-  if (!joyKeys) return;
+  if (!joyKeys || !emulateKeys) return;
   for (int b = 0; b < 6; b++)
     if (((was ^ now) >> b) & 1) hwKeyEvent(JOY_KEY_NAMES[b], (now >> b) & 1, 0);
 }
+void hwJoystickUpdate(int n, const HwJoystick& s) { joySet(n, s, true); }
+void hwJoystickUpdateQuiet(int n, const HwJoystick& s) { joySet(n, s, false); }  // (a keyboard already sent the keys)
 static void joystickPoll(Interp& I) {  // button press / release events for joystick.on()
   static uint32_t prevButtons[HW_JOYSTICKS];
   for (int n = 0; n < HW_JOYSTICKS; n++) {
@@ -1139,9 +1181,10 @@ static void keyboardBegin() {}
 static void keyboardPoll(Interp&) {}
 static Value heldKeys(Interp& I) { return Value::obj(I.newArray()); }
 #endif
-#if BOARD_KEYBOARD != KEYBOARD_EXTERNAL  // joysticks need an external input driver
+#if !EXT_INPUT  // joysticks need an external input driver
 static volatile bool joyKeys = true;
 void hwJoystickUpdate(int, const HwJoystick&) {}
+void hwJoystickUpdateQuiet(int, const HwJoystick&) {}
 static void joystickPoll(Interp&) {}
 static HwJoystick joyState(int) { return HwJoystick{}; }
 #endif
@@ -1173,6 +1216,8 @@ JS_NATIVE(joystick_read) {  // joystick.read(n = 0)
   I.setOwn(o, "y2", ax(j.axis[3]));
   I.setOwn(o, "hat", Value::num(j.connected ? j.hat : -1));
   I.setOwn(o, "buttons", Value::num(j.buttons));
+  I.setOwn(o, "lt", Value::num(std::round(j.trig[0] / 255.0 * 1000) / 1000));  // triggers 0..1
+  I.setOwn(o, "rt", Value::num(std::round(j.trig[1] / 255.0 * 1000) / 1000));
   Array* raw = I.newArray();
   for (int i = 0; i < j.rawLen; i++) raw->items.push_back(Value::num(j.raw[i]));
   I.setOwn(o, "raw", Value::obj(raw));
@@ -2730,6 +2775,24 @@ static void speakerEnableFromConfig() {
 #endif
 }
 
+#if JS_BLE && EXT_INPUT
+// Whether to start the Bluetooth host at boot, so paired keyboards, mice and gamepads reconnect by themselves and stay
+// connected from app to app: "bleHost": true / false in micro-js.json says so; without the setting it starts when
+// something was paired from this board (ble.host's saved list isn't empty). 1 = start, 0 = don't, -1 = no setting.
+static int bleHostFromConfig() {
+  for (const char* path : CONFIG_PATHS) {
+    std::string text;
+    if (!hwReadFile(path, text)) continue;
+    size_t k = text.find("\"bleHost\"");
+    if (k == std::string::npos) return -1;
+    size_t c = text.find(':', k), v = c == std::string::npos ? c : text.find_first_not_of(" \t", c + 1);
+    if (v == std::string::npos) return -1;
+    return text.compare(v, 4, "true") == 0 ? 1 : 0;
+  }
+  return -1;
+}
+#endif
+
 static void setTimeZoneFromConfig() {
   for (const char* path : CONFIG_PATHS) {
     std::string text;
@@ -2987,6 +3050,12 @@ static void bootStep(int n) {
 
 static uint32_t bootRoomKB = 0;  // free memory (and PSRAM) as the first interpreter starts, before any app: board.ramKB
 void hwBegin() {
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+  rtcMark();
+#endif
+#if CONFIG_IDF_TARGET_ESP32S3 && JS_BLE
+  bootLogAdd();
+#endif
 #if MICROJS_RP2
   uint32_t last = watchdog_hw->scratch[5];
   if (watchdog_enable_caused_reboot() && (last & 0xFFFFFF00u) == BOOT_MAGIC && (last & 0xFF) < 7)
@@ -3063,6 +3132,9 @@ void hwBegin() {
   BOOT_STEP(6) keyboardBegin();  // after the filesystems: a USB keyboard driver's timer must not run during a format
 #if BOARD_SPEAKER_I2S_DOUT >= 0
   speakerBegin();  // after the keyboard and touch: an ES8311 codec shares their I2C bus
+#endif
+#if JS_BLE && EXT_INPUT
+  { int cfg = bleHostFromConfig(); if (cfg == 1 || (cfg == -1 && !hostSavedLoad().empty())) hostStart(); }
 #endif
   BOOT_STEP(7) {}  // until the interpreter is up (hwSplash)
 }
@@ -3244,6 +3316,9 @@ void hwReset() {
 #if JS_WIFI
   webStop();  // and its web server
   nowStop();  // and its espnow
+#endif
+#if JS_BLE
+  bleAppEnd();  // and its Bluetooth (a paired keyboard / mouse / gamepad stays connected)
 #endif
 #if HAS_MUSIC
   mp3StopWait();  // leaving an app stops its music
@@ -3467,7 +3542,7 @@ static void fireKey(Interp& I, const char* ev, int row, int col) {
 #endif
 
 void hwPoll(Interp& I) {
-#if BOARD_KEYBOARD != KEYBOARD_NONE
+#if BOARD_KEYBOARD != KEYBOARD_NONE || EXT_INPUT
   static uint32_t lastKey = 0;
   if (keyHandlers && millis() - lastKey >= 5) {
     lastKey = millis();
@@ -3475,6 +3550,9 @@ void hwPoll(Interp& I) {
   }
 #endif
   joystickPoll(I);
+#if JS_BLE && EXT_INPUT && !defined(BOARD_SCREEN_HEADER)
+  bleHostService();  // the mouse arrow
+#endif
 #if JS_WIFI
   if (dnsServer) dnsServer->processNextRequest();  // captive portal DNS (wifi.ap)
   if (webServer) webServer->handleClient();  // answer web requests (web.on handlers)
@@ -3488,8 +3566,12 @@ void hwPoll(Interp& I) {
   if (now - last < 15 || !touchHandlers || touchHandlers->props.empty()) return;
   last = now;
   int rx, ry, rz, sx, sy;
-  if (touchRaw(rx, ry, rz)) {
-    mapTouch(rx, ry, sx, sy);
+  bool have = touchRaw(rx, ry, rz);
+  if (have) mapTouch(rx, ry, sx, sy);
+#if JS_BLE && EXT_INPUT
+  else have = blePointerDown(sx, sy, rz);  // a Bluetooth mouse's left button is a touch
+#endif
+  if (have) {
     releases = 0;
     if (!down) {
       down = true;
@@ -3845,6 +3927,19 @@ void hwInstall(Interp& I) {
   I.setOwn(board, "hasBattery", Value::boolean(BOARD_BATTERY_ADC >= 0));
   I.setOwn(board, "hasMusic", Value::boolean(HAS_MUSIC));
   I.setOwn(board, "hasWifi", Value::boolean(JS_WIFI));
+  I.setOwn(board, "hasBle", Value::boolean(JS_BLE));
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+  {  // why the last reset happened: "panic" (a crash), "int_wdt" / "task_wdt" / "wdt", "brownout", "poweron", "software", "usb"...
+    static const char* const R[] = {"unknown", "poweron", "external", "software", "panic", "int_wdt", "task_wdt", "wdt", "deepsleep", "brownout", "sdio", "usb", "jtag"};
+    int r = (int)esp_reset_reason();
+    I.setOwn(board, "resetReason", I.str(r >= 0 && r < 13 ? R[r] : "unknown"));
+    I.setOwn(board, "resetCause", Value::num(esp_rom_get_reset_reason(0)));  // the chip's own code: 1 power-on, 3 software, 12 CPU software, 15 brown-out ...
+    I.setOwn(board, "rtcSurvived", Value::boolean(rtcSurvived));  // RTC memory kept its marker: not a real power loss
+#if CONFIG_IDF_TARGET_ESP32S3 && JS_BLE
+    I.setOwn(board, "bootLog", I.str(bootLogText));
+#endif
+  }
+#endif
   // how the board reaches the network: "wifi", "usb" (through the computer: tools/bridge.js) or ""
   I.setOwn(board, "network", I.str(JS_WIFI ? "wifi" : MICROJS_BRIDGE ? "usb" : ""));  // no: the wifi, http and web objects don't exist
 #if MICROJS_RP2
@@ -3907,6 +4002,45 @@ void hwInstall(Interp& I) {
   I.def(espnow, "mac", now_mac);
   I.def(espnow, "stop", now_stop);
   I.setGlobal("espnow", Value::obj(espnow));
+#endif
+#if JS_BLE
+  Object* ble = I.newObject();
+  I.def(ble, "scan", ble_scan);
+  I.def(ble, "stop", blehid_stop);
+  Object* bhid = I.newObject();
+  I.def(bhid, "begin", blehid_begin);
+  I.def(bhid, "connected", blehid_connected);
+  I.def(bhid, "peer", blehid_peer);
+  I.def(bhid, "type", blehid_type);
+  I.def(bhid, "tap", blehid_tap);
+  I.def(bhid, "press", blehid_press);
+  I.def(bhid, "release", blehid_release);
+  I.def(bhid, "releaseAll", blehid_releaseAll);
+  I.def(bhid, "move", blehid_move);
+  I.def(bhid, "buttons", blehid_buttons);
+  I.def(bhid, "click", blehid_click);
+  I.def(bhid, "pad", blehid_pad);
+  I.def(bhid, "stop", blehid_stop);
+  I.setOwn(ble, "hid", Value::obj(bhid));
+#if EXT_INPUT
+  Object* bhost = I.newObject();
+  I.def(bhost, "begin", host_begin);
+  I.def(bhost, "connect", host_connect);
+  I.def(bhost, "status", host_status);
+  I.def(bhost, "devices", host_devices);
+  I.def(bhost, "dump", host_dump);
+  I.def(bhost, "raw", host_raw);
+  I.def(bhost, "report", host_report);
+  I.def(bhost, "decode", host_decode);
+  I.def(bhost, "feature", host_feature);
+  I.def(bhost, "valve", host_valve);
+  I.def(bhost, "bonded", host_bonded);
+  I.def(bhost, "forget", host_forget);
+  I.def(bhost, "cursor", host_cursor);
+  I.def(bhost, "stop", host_stop);
+  I.setOwn(ble, "host", Value::obj(bhost));
+#endif
+  I.setGlobal("ble", Value::obj(ble));
 #endif
   I.temps.clear();
 }

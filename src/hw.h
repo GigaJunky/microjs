@@ -40,9 +40,11 @@ struct HwJoystick {
   uint32_t buttons;
   uint8_t raw[8];
   uint8_t rawLen;
+  uint8_t trig[2];  // analogue triggers 0..255 (left, right), 0 if the pad has none
 };
 static const int HW_JOYSTICKS = 2;
 void hwJoystickUpdate(int n, const HwJoystick& state);
+void hwJoystickUpdateQuiet(int n, const HwJoystick& state);  // the same without the arrow-key emulation
 
 // files: "/sd/..." lives on the SD card, everything else on the internal LittleFS flash
 struct FileEntry {

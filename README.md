@@ -42,6 +42,8 @@ setInterval(() => led(0, Math.random() * 40, 0), 200);
     8-bit DAC)
   - LittleFS flash and SD card files: copy, move, folders, free space
   - WiFi, HTTP(S) and NTP time
+  - Bluetooth LE on the CYD-S3: scanning, pairing BLE keyboards, mice and gamepads, and acting as a
+    Bluetooth keyboard, mouse or gamepad itself
 - **Apps:** a launcher with volume and battery, a file manager, music and video players, a
   picture viewer, a JavaScript editor, games, a weather/stocks/news dashboard, and a firmware
   installer that switches between micro-js and other firmware from the SD card.
@@ -56,7 +58,7 @@ setInterval(() => led(0, Math.random() * 40, 0), 200);
 |---|---|---|
 | `cyd` | ESP32-2432S028R "Cheap Yellow Display" (one USB port) | tested; limited: no PSRAM, so the big and WiFi apps may run out of memory |
 | `cyd2usb` | CYD variant with two USB ports (ST7789 panel) | builds; same board otherwise |
-| `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812 RGB LED on GPIO 42, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery |
+| `cyd-s3` | ESP32-S3 "CYD" 2.8" (LCDWiki ES3C28P): 8 MB PSRAM, 16 MB flash, ILI9341V IPS, FT6336G capacitive touch, ES8311 audio, SD (SDIO), WS2812 RGB LED on GPIO 42, battery | tested: display, touch, sound, MP3, video, pictures, SD, battery, Bluetooth LE (scan, an Xbox gamepad; the only board with Bluetooth built in) |
 | `cardputer-adv` | M5Stack Cardputer ADV: ESP32-S3, 240×135 ST7789, 56-key keyboard, ES8311 audio, battery, no touch, no PSRAM | tested: display, keyboard, sound, LED, SD |
 | `coco-vga` | [ESP32-CoCo](https://github.com/mast4rbug/ESP32-CoCo) board: ESP32-S3, VGA output, USB keyboards and gamepads, SD, PWM sound | tested (see "The ESP32-CoCo VGA board") |
 | `rp2350-pizero` | Waveshare RP2350-PiZero: RP2350B (520 KB RAM, 16 MB flash), mini HDMI out, USB keyboards and gamepads (hubs work), microSD, PWM sound on a header pin; **no WiFi or Bluetooth** | tested: HDMI, USB keyboard and gamepad, SD, flash, network and clock through the computer (see "The RP2350-PiZero") |
@@ -80,7 +82,7 @@ that profile (see `[env]` in `platformio.ini`).
 Scripts can see what the board has through `board`:
 `board.name`, `board.touch` (`"resistive"`, `"capacitive"` or `"none"`), `board.hasTouch`, `board.hasKeyboard`,
 `board.hasLed`, `board.hasSpeaker`, `board.hasMusic` (MP3 and video sound),
-`board.hasLight`, `board.hasSd`, `board.hasBattery`, `board.hasWifi`, `board.psram` (bytes),
+`board.hasLight`, `board.hasSd`, `board.hasBattery`, `board.hasWifi`, `board.hasBle`, `board.psram` (bytes),
 `board.chip` (`"esp32"`, `"esp32s3"` or `"rp2350"`). The launcher leaves out apps marked
 `@needs-wifi` on boards without WiFi and `@needs-esp32` on other chips.
 
@@ -269,12 +271,14 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   five targets, check, and Save - it's stored in `/touchcal.json` and loaded at every start.
   (The resistive CYD's old form, `touch.calibrate(xMin, xMax, yMin, yMax)`, still works.)
 
-### `joystick` (USB gamepads: VGA board, RP2350-PiZero)
+### `joystick` (USB gamepads: VGA board, RP2350-PiZero; Bluetooth LE gamepads: CYD-S3)
 
-- `joystick.read(n = 0)` returns `{connected, x, y, x2, y2, hat, buttons, raw}`:
+- `joystick.read(n = 0)` returns `{connected, x, y, x2, y2, hat, buttons, lt, rt, raw}`:
   - `x`/`y` and `x2`/`y2` are the two sticks, from −1 to 1.
   - `hat` is the D-pad: −1 when centred, otherwise 0–7 clockwise from up.
   - `buttons` is a bit mask, with button 1 as bit 0.
+  - `lt` and `rt` are the analogue triggers, 0 to 1 (Bluetooth gamepads with analogue triggers, such as the Xbox
+    controller; 0 on pads that report triggers as buttons).
 - `joystick.count()` gives the number of pads connected (up to two).
 - `joystick.on("press" | "release", ({joystick, button}) => …)` fires on button changes;
   `joystick.off([event])` removes the handler.
@@ -284,7 +288,7 @@ area, draw it in horizontal bands through one small sprite, as `data/bounce.js` 
   resting in the middle are sticks, and a nibble resting at 15 or 8 is the D-pad. Everything
   else is a button. Don't hold anything while plugging a pad in.
 
-### `keyboard` (Cardputer, USB keyboards)
+### `keyboard` (Cardputer, USB keyboards, Bluetooth LE keyboards on the CYD-S3)
 
 - `keyboard.on("key" | "keyup", ({key, shift, fn, ctrl, opt, alt}) => …)` registers a handler;
   `keyboard.off([event])` removes it. `key` is the character (`"a"`, `"A"` with Shift, `" "`),
@@ -407,6 +411,9 @@ amplifier is switched on by GPIO 4 held low. For those, add
 every boot. (Don't add `speakerEnable` on a standard CYD: there GPIO 4 is the red LED.) Both apply
 only to the classic CYDs, so a `micro-js.json` shared on an SD card is safe in the other boards.
 
+**Bluetooth (CYD-S3).** `"bleHost": true` starts the Bluetooth host at every boot, `false` never does. Without the
+setting it starts when something was paired from the board. See [`ble`](#ble-bluetooth-le-cyd-s3-only).
+
 `utcOffsetHours` is your time zone as hours from UTC (e.g. `-5`, `1`, `5.5`); change it by one
 when daylight saving starts or ends. `fetch.js` and `clock.js` read their WiFi, clock offset,
 location and stock symbols from this file. Your own scripts
@@ -472,6 +479,54 @@ Messages aren't encrypted or authenticated: anything nearby can read and send th
 different addresses can be sent to in one run. `espnow.js` is a radio version of `remote.js` (shared LED mixer, beep, chat; messages are small JSON
 broadcasts such as `{"t":"led","r":0,"g":200,...}`, `{"t":"beep"}` and `{"t":"chat","n":"name","m":"text"}`). The simulator has the calls but no radio.
 
+
+### `ble` (Bluetooth LE, CYD-S3 only)
+
+The CYD-S3 can scan for Bluetooth Low Energy devices, pair BLE keyboards, mice and gamepads and use them like the USB ones,
+and act as a Bluetooth keyboard, mouse or gamepad for a phone or computer. Check `board.hasBle`. It is built only for
+the CYD-S3: the other boards lack the RAM (on the CoCo VGA board it took 47 KB of about 67 KB free and video and mp3
+crashed; the Cardputer has no PSRAM; the classic CYD has no room), and the RP2350 has no radio. The ESP32-S3 does
+Bluetooth **LE only**: classic-Bluetooth devices (Joy-Cons, the Switch Pro Controller, most Switch-style pads, older
+keyboards and mice) can't pair. Look for "Bluetooth LE" or "BLE" on the box.
+
+| Call | Notes |
+|---|---|
+| `ble.scan([seconds])` | blocks for 1-30 s (default 3); returns `[{name, mac, rssi, connectable, type, hid}]`, strongest first. `hid` is true for devices offering the HID service (keyboards, mice, gamepads). `connectable` is unreliable |
+| `ble.host.begin()` | starts the host; returns `true`. Paired devices are reconnected by scanning whenever they are in range |
+| `ble.host.connect(mac[, type])` | pairs and connects one device (`mac` and `type` from `ble.scan`); returns at once, follow it with `ble.host.status()` |
+| `ble.host.status()` | `{state: "idle" \| "connecting" \| "pairing" \| "connected" \| "failed", passkey, error, devices, rx, pads}`. A keyboard may ask for a `passkey` to be typed on the keyboard itself |
+| `ble.host.devices()` | `[{mac, name, kind: "keyboard" \| "mouse" \| "gamepad" (joined with +), joystick, rx}]` |
+| `ble.host.bonded()` / `ble.host.forget(mac \| "*")` | the saved list; forget one or all |
+| `ble.host.cursor(on)` | the mouse arrow (drawn on the screen; on by default) |
+| `ble.host.stop()` / `ble.stop()` | leave Bluetooth and free its memory |
+| `ble.hid.begin([name])` | the board as a Bluetooth keyboard + mouse + gamepad (advertised as "micro-js"); pair it from the phone or computer. `ble.hid.connected()` and `ble.hid.peer()` (the other side's address) |
+| `ble.hid.type(text)`, `ble.hid.tap("ctrl+c")`, `ble.hid.press(key)` / `release(key)` / `releaseAll()` | the keyboard (US layout; keys named like `enter`, `esc`, `tab`, `backspace`, `up`, `f5`, `ctrl`, `shift`, `alt`, `gui`) |
+| `ble.hid.move(dx, dy[, wheel])`, `ble.hid.buttons(mask)`, `ble.hid.click([mask])` | the mouse (buttons: 1 left, 2 right, 4 middle) |
+| `ble.hid.pad({x, y, rx, ry, buttons})` | the gamepad: axes -127 to 127, `buttons` a 16-bit mask |
+
+**Using a paired device.** Keys arrive as `keyboard.on("key")`, a gamepad is `joystick.read(0)` (or 1) with the
+sticks, the hat, the buttons and the analogue triggers `lt`/`rt` (and the arrow keys, Space and Enter like a USB
+pad, unless `joystick.keys(false)`), and a mouse moves an arrow on the screen whose left button is a touch
+(`touch.on` "down", "move", "up"), so touch apps work with it. Each device's HID report map is parsed once, so any
+standard keyboard, mouse or gamepad decodes without a per-device table. The host starts at boot when something is
+paired (see `bleHost` under [Settings file](#settings-file)), reconnects by scanning when you press the device's button
+(its address changes, so the saved address alone isn't enough), and stays connected from app to app.
+
+**The Bruce app** has a *Bluetooth* sub menu: *Scan devices*, *Keyboard* (an on-screen keyboard that types on the paired
+computer), *Mouse*, *Gamepad*, *Input test* (live values for the paired device: report counts, sticks, buttons, triggers,
+uptime), *Raw reports* and *Pair a device* (pick a device from the scan and pair it). On touch boards the lists have big rows
+and the page arrows are in the title bar.
+
+**Tested:** the Xbox One S controller (model 1708, after its firmware update that adds Bluetooth LE) as a gamepad with
+sticks, triggers, hat and buttons; scanning; the Bruce menus. **Not tested:** the phone/computer side of `ble.hid` (the
+board as a keyboard, mouse or gamepad), and BLE keyboards and mice paired to the board (only the Xbox pad was). The original
+Steam Controller pairs and shows keyboard and mouse input in its default mode, but its real gamepad mode isn't
+implemented (it needs Valve's own Bluetooth commands). Pairing is "Just Works": devices that need a passkey (some
+keyboards) show it on screen to be typed on the keyboard.
+
+**Memory.** Bluetooth costs about 45 KB of internal RAM on the CYD-S3 (about 100 KB stay free). The host is kept running
+across apps; `ble.stop()` or `"bleHost": false` gives the memory back. Starting it with too little free memory (or on a board
+that can't) throws a normal error instead of aborting.
 
 ### `canvas` (browser-style drawing)
 

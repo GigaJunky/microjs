@@ -1,4 +1,4 @@
-# micro-js 1.1.161
+# micro-js 1.1.164
 
 Bluetooth LE on the CYD-S3: scan, pair BLE keyboards, mice and gamepads, and act as one.
 
@@ -35,10 +35,10 @@ Bluetooth LE on the CYD-S3: scan, pair BLE keyboards, mice and gamepads, and act
   in `board.bootLog` (`1` = power-on) points at a supply dip, which some PC USB ports and hubs cause.
 
 ## Files
-- `micro-js-1.1.161-<board>-firmware.bin` (`.uf2` for the RP2350-PiZero): the firmware only; it keeps the
+- `micro-js-1.1.164-<board>-firmware.bin` (`.uf2` for the RP2350-PiZero): the firmware only; it keeps the
   apps and settings on the board.
-- `micro-js-1.1.161-apps.zip`: every app, for every board (Bruce's Bluetooth tools are in `lib/bruce-ble.js`).
-- `MICROJS_1-1-161.FLH`: for the ESP32-CoCo emulator's own Flash menu.
+- `micro-js-1.1.164-apps.zip`: every app, for every board (Bruce's Bluetooth tools are in `lib/bruce-ble.js`).
+- `MICROJS_1-1-164.FLH`: for the ESP32-CoCo emulator's own Flash menu.
 
 ## Boards
 cyd (limited: no PSRAM; music yes, video no), cyd2usb, cyd-s3 (the only board with Bluetooth), cardputer-adv,

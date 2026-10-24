@@ -11,7 +11,6 @@
 // Each device's HID report descriptor is parsed once, so any standard keyboard, mouse or gamepad decodes.
 #pragma once
 #include "usb_hid.h"
-#include <Preferences.h>
 
 // ---------------------------------------------------------------- report descriptor -> fields
 enum { E_MOD = 1, E_KEYS, E_BTN, E_AXIS, E_HAT, E_WHEEL, E_TRIG };
@@ -311,10 +310,7 @@ static void hostDrop(HostDev& d) {
 struct HostSaved { std::string mac, name; uint8_t type; };
 static std::vector<HostSaved> hostSavedLoad() {
   std::vector<HostSaved> v;
-  Preferences pr;
-  pr.begin("mjsble", true);
-  std::string t = pr.getString("host", "").c_str();
-  pr.end();
+  std::string t = nvsGet("mjsble", "host");
   size_t at = 0;
   while (at < t.size()) {  // "AA:BB:CC:DD:EE:FF/0/name;..."
     size_t semi = t.find(';', at);
@@ -329,10 +325,7 @@ static std::vector<HostSaved> hostSavedLoad() {
 static void hostSavedStore(const std::vector<HostSaved>& v) {
   std::string t;
   for (auto& e : v) t += e.mac + "/" + std::to_string(e.type) + "/" + e.name + ";";
-  Preferences pr;
-  pr.begin("mjsble", false);
-  pr.putString("host", t.c_str());
-  pr.end();
+  nvsPut("mjsble", "host", t);
 }
 // A new pairing replaces an older entry with the same address or the same name (a Steam Controller takes a new
 // address each time it enters pairing mode, and the old one is dead); the list keeps the last four.

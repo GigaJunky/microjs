@@ -52,20 +52,38 @@ static bool rtcSurvived = false;
 static void rtcMark() { rtcSurvived = rtcMagic == 0xC0FFEE42u; rtcMagic = 0xC0FFEE42u; }
 #endif
 #if CONFIG_IDF_TARGET_ESP32S3 && JS_BLE
-#include <Preferences.h>
+#include <nvs.h>
+// a small string kept in the chip's flash storage (NVS): nvsGet(namespace, key) / nvsPut(namespace, key, text)
+// (not Preferences.h: PlatformIO would find another board's library of that name even though this is under an #if)
+static std::string nvsGet(const char* ns, const char* key) {
+  nvs_handle_t h;
+  std::string out;
+  if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) return out;
+  size_t n = 0;
+  if (nvs_get_str(h, key, nullptr, &n) == ESP_OK && n > 1) {
+    std::vector<char> buf(n);
+    if (nvs_get_str(h, key, buf.data(), &n) == ESP_OK) out.assign(buf.data());
+  }
+  nvs_close(h);
+  return out;
+}
+static void nvsPut(const char* ns, const char* key, const std::string& text) {
+  nvs_handle_t h;
+  if (nvs_open(ns, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_str(h, key, text.c_str());
+  nvs_commit(h);
+  nvs_close(h);
+}
 // the last boots: "cause/rtcKept;..." (the chip's reset code, and whether RTC memory kept its marker), kept in flash
 // so a reset that costs the USB connection can still be read afterwards (board.bootLog)
 static std::string bootLogText;
 static void bootLogAdd() {
-  Preferences pr;
-  pr.begin("mjsboot", false);
-  std::string h = pr.getString("h", "").c_str();
+  std::string h = nvsGet("mjsboot", "h");
   h += std::to_string((int)esp_rom_get_reset_reason(0)) + "/" + (rtcSurvived ? "1" : "0") + ";";
   size_t cut = 0;
   for (int n = 0, i = (int)h.size() - 1; i >= 0; i--) if (h[i] == ';' && ++n > 8) { cut = i + 1; break; }  // keep the last 8
   h = h.substr(cut);
-  pr.putString("h", h.c_str());
-  pr.end();
+  nvsPut("mjsboot", "h", h);
   bootLogText = h;
 }
 #endif
